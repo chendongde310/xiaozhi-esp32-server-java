@@ -71,12 +71,27 @@ public class Conversation extends ConversationIdentifier {
             .append(System.lineSeparator())
             .append("请据此调整回应方式和语气，但无需在回复中提及或解释这些标签。任一标签可能缺省。")
             .append(System.lineSeparator());
+        msgBuilder.append("优先回答用户本轮真实请求；如果用户只是想聊天、陪伴、吐槽或整理心情，不要把它改写成任务记录，")
+                .append("也不要生硬提“星球轨道”“今日任务”等内部概念。")
+                .append(System.lineSeparator());
         if(StringUtils.hasText(roleDesc)) {
             var roleMessage = new SystemMessage(msgBuilder.toString());
             return Optional.of(roleMessage);
         }else{
             return Optional.empty();
         }
+    }
+
+    /**
+     * 每轮动态状态 SystemMessage（如快乐能量、陪伴天数、当前频道、档案摘要）。
+     * <p>
+     * 必须置于稳定的 {@link #roleSystemMessage} 之后：稳定前缀保持字节不变以复用 KV cache，
+     * 每轮变化的动态状态作为独立的后续 SystemMessage 追加。内容来自
+     * {@link ConversationContext#agentStateText()}，为空则不注入。
+     */
+    protected Optional<SystemMessage> dynamicStateSystemMessage(ConversationContext context) {
+        String s = context != null ? context.agentStateText() : null;
+        return StringUtils.hasText(s) ? Optional.of(new SystemMessage(s)) : Optional.empty();
     }
 
     /**

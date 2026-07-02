@@ -6,13 +6,18 @@ package com.xiaozhi.common.model;
  * 设备对话管道中，Synthesizer 只消费 {@code content} 类型的 Token，思考内容被过滤。
  * Web 聊天场景下，前端可同时接收 {@code thinking} 和 {@code content}，展示推理过程。
  *
- * @param type 类型：{@code "thinking"} 表示推理/思考过程，{@code "content"} 表示正式回复
+ * @param type 类型：{@code "status"} 表示状态提示，{@code "thinking"} 表示推理/思考过程，{@code "content"} 表示正式回复
  * @param text 文本内容
  */
 public record ChatToken(String type, String text) {
 
+    public static final String TYPE_STATUS = "status";
     public static final String TYPE_THINKING = "thinking";
     public static final String TYPE_CONTENT = "content";
+
+    public static ChatToken status(String text) {
+        return new ChatToken(TYPE_STATUS, text);
+    }
 
     public static ChatToken thinking(String text) {
         return new ChatToken(TYPE_THINKING, text);
@@ -24,6 +29,10 @@ public record ChatToken(String type, String text) {
 
     public boolean isThinking() {
         return TYPE_THINKING.equals(type);
+    }
+
+    public boolean isStatus() {
+        return TYPE_STATUS.equals(type);
     }
 
     public boolean isContent() {

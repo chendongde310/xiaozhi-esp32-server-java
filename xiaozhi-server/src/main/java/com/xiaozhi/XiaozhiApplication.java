@@ -40,6 +40,8 @@ import lombok.extern.slf4j.Slf4j;
     "com.xiaozhi.user",
     "com.xiaozhi.userauth",
     "com.xiaozhi.task",
+    // 快乐星球陪伴智能体（服务层 + server 层控制器/定时任务）
+    "com.xiaozhi.happyplanet",
     // xiaozhi-ai
     "com.xiaozhi.ai",
     // xiaozhi-server
@@ -63,6 +65,7 @@ import lombok.extern.slf4j.Slf4j;
     "com.xiaozhi.userauth.dal.mysql.mapper",
     "com.xiaozhi.user.dal.mysql.mapper",
     "com.xiaozhi.operationlog.dal.mysql.mapper",
+    "com.xiaozhi.happyplanet.dal.mysql.mapper",
 })
 @Slf4j
 public class XiaozhiApplication {

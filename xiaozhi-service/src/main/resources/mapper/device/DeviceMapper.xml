@@ -107,4 +107,18 @@
           AND sessionId = #{sessionId}
           AND code = #{code}
     </update>
+
+    <delete id="deleteVerifyCode">
+        DELETE FROM sys_code
+        WHERE code = #{code}
+        <if test="deviceId != null and deviceId != ''">
+            AND deviceId = #{deviceId}
+        </if>
+        <if test="sessionId != null and sessionId != ''">
+            AND sessionId = #{sessionId}
+        </if>
+        <if test="type != null and type != ''">
+            AND type = #{type}
+        </if>
+    </delete>
 </mapper>

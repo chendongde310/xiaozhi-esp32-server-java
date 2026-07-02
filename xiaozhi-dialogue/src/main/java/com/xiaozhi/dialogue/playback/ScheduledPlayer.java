@@ -1,7 +1,6 @@
 package com.xiaozhi.dialogue.playback;
 
 import com.xiaozhi.common.Speech;
-import com.xiaozhi.utils.EmojiUtils;
 
 import com.xiaozhi.communication.common.ChatSession;
 import com.xiaozhi.communication.message.MessageSender;
@@ -53,6 +52,12 @@ public class ScheduledPlayer extends Player {
 
     // 句子间隔标记（空帧），发送线程遇到时跳过发送并增加playPosition间隔
     private static final Speech SENTENCE_GAP_MARKER = new Speech(new byte[0]);
+
+    // 无明确情绪时的默认表情：保持稳定，绝不随机（随机会导致设备表情逐句乱跳、无规律）
+    private static final String DEFAULT_EMOTION = "happy";
+
+    // 当前正在展示的表情，仅在情绪发生变化时才向设备下发，避免重复/抖动
+    private volatile String currentEmotion = null;
 
     // Burst模式状态
     private long startTimestamp = 0;  // 播放开始的绝对时间戳（纳秒）
@@ -279,7 +284,14 @@ public class ScheduledPlayer extends Player {
         String text = speech.getText();
         if (StringUtils.hasText(text)) {
             String mood = speech.getMood();
-            sendEmotion(StringUtils.hasText(mood) ? mood : EmojiUtils.getRandomEmotion());
+            // 有明确情绪则采用；否则保持当前表情（首次无情绪时用默认），绝不随机切换
+            String emotion = StringUtils.hasText(mood) ? mood
+                    : (currentEmotion != null ? currentEmotion : DEFAULT_EMOTION);
+            // 仅当表情发生变化时才下发，避免逐句重复/抖动
+            if (!emotion.equals(currentEmotion)) {
+                sendEmotion(emotion);
+                currentEmotion = emotion;
+            }
             sendSentenceStart(text);
         }
 

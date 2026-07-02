@@ -49,9 +49,21 @@ public class FileSynthesizer extends Synthesizer {
      */
     @Override
     public void synthesize(Flux<String> stringFlux) {
+        doSynthesize(stringFlux, null);
+    }
+
+    @Override
+    public void synthesize(Flux<String> stringFlux, String emotion) {
+        doSynthesize(stringFlux, emotion);
+    }
+
+    /**
+     * @param forcedMood 若非空则强制作为设备表情（显式情绪优先于从文本 emoji 提取的心情）
+     */
+    private void doSynthesize(Flux<String> stringFlux, String forcedMood) {
         llmDisposable = new SentenceHelper().convert(stringFlux).subscribe(result -> {
             String text = result.text();
-            String mood = result.mood();
+            String mood = (forcedMood != null && !forcedMood.isEmpty()) ? forcedMood : result.mood();
             Flux<Speech> lazyTtsFlux = Flux.create(sink -> {
                 try {
                     Path audioPath = ttsService.textToSpeech(text);
@@ -81,7 +93,12 @@ public class FileSynthesizer extends Synthesizer {
     @Override
     public void synthesize(String text) {
         // 委托给 synthesize(Flux) 处理，缓存指标在那里统一记录
-        synthesize(Flux.just(text));
+        doSynthesize(Flux.just(text), null);
+    }
+
+    @Override
+    public void synthesize(String text, String emotion) {
+        doSynthesize(Flux.just(text), emotion);
     }
 
 }

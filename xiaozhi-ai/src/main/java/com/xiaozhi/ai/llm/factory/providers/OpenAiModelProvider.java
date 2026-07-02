@@ -28,6 +28,7 @@ import org.springframework.web.reactive.function.client.WebClient;
 
 import java.net.http.HttpClient;
 import java.time.Duration;
+import java.util.Map;
 
 import lombok.extern.slf4j.Slf4j;
 /**
@@ -88,6 +89,11 @@ public class OpenAiModelProvider implements ChatModelProvider {
                 .maxCompletionTokens(2000)
                 .streamUsage(true);
 
+        if (isDashScopeEndpoint(endpoint)) {
+            chatOptionsBuilder.extraBody(Map.of("enable_thinking", enableThinking));
+            log.info("DashScope model {} 设置 enable_thinking={}", model, enableThinking);
+        }
+
         if (enableThinking) {
             chatOptionsBuilder.reasoningEffort("medium");
             log.info("OpenAI model {} 已启用思考模式，reasoningEffort=medium", model);
@@ -104,6 +110,10 @@ public class OpenAiModelProvider implements ChatModelProvider {
         
         log.info("Created OpenAI ChatModel: model={}, endpoint={}, thinking={}", model, endpoint, enableThinking);
         return chatModel;
+    }
+
+    private boolean isDashScopeEndpoint(String endpoint) {
+        return StringUtils.hasText(endpoint) && endpoint.toLowerCase().contains("dashscope.aliyuncs.com");
     }
 
     @Override

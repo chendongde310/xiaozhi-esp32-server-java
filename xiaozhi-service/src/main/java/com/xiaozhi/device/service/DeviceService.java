@@ -29,4 +29,6 @@ public interface DeviceService {
 
     int updateCodeAudioPath(String deviceId, String sessionId, String code, String audioPath);
 
+    int consumeCode(String code, String deviceId, String sessionId, String type);
+
 }

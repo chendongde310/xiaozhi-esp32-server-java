@@ -27,6 +27,18 @@ export default {
   agent: {
     query: '/agent',
   },
+  happyPlanet: {
+    agents: '/happyplanet/agents',
+    profile: '/happyplanet/profile',
+    playerCode: '/happyplanet/player-code',
+    report: '/happyplanet/report',
+    reports: '/happyplanet/reports',
+    demoSeed: '/happyplanet/demo-seed',
+  },
+  proactive: {
+    config: '/proactive/config',
+    toggle: '/proactive/toggle',
+  },
   role: {
     add: '/role',
     query: '/role',

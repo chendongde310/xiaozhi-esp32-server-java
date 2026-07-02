@@ -9,6 +9,7 @@ import com.xiaozhi.ai.llm.memory.MessageWindowConversation;
 import com.xiaozhi.common.model.ChatToken;
 import com.xiaozhi.common.model.bo.MessageBO;
 import com.xiaozhi.common.model.bo.RoleBO;
+import com.xiaozhi.happyplanet.service.AgentRuntimeService;
 import com.xiaozhi.message.service.MessageService;
 import com.xiaozhi.role.service.RoleService;
 import jakarta.annotation.Resource;
@@ -23,13 +24,16 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
 import java.time.Instant;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.ConcurrentHashMap;
 
 import lombok.extern.slf4j.Slf4j;
@@ -48,9 +52,17 @@ public class WebChatService {
     private ChatMemory chatMemory;
     @Resource
     private MessageService messageService;
+    @Resource
+    private AgentRuntimeService agentRuntimeService;
 
     @Value("${conversation.max-messages:16}")
     private int maxMessages;
+
+    @Value("${conversation.app-max-messages:8}")
+    private int appMaxMessages;
+
+    @Value("${conversation.app-first-content-timeout-seconds:6}")
+    private long appFirstContentTimeoutSeconds;
 
     /**
      * sessionId → Conversation 映射
@@ -69,7 +81,44 @@ public class WebChatService {
      * @return sessionId
      */
     public String openSession(Integer userId, Integer roleId, String resumeSessionId) {
-        String ownerId = "web:" + userId;
+        return openSession(userId, roleId, "web:" + userId, resumeSessionId);
+    }
+
+    private ConversationContext conversationContext(Conversation conversation, String userText) {
+        String ownerId = conversation.getOwnerId();
+        if (!StringUtils.hasText(ownerId) || ownerId.startsWith("web:")) {
+            return ConversationContext.EMPTY;
+        }
+        String agentStateText = agentRuntimeService.buildTurnState(
+                ownerId,
+                conversation.getRoleId(),
+                userText,
+                null
+        );
+        return new ConversationContext(null, agentStateText);
+    }
+
+    /**
+     * 开启指定 ownerId 的文本聊天会话。
+     * 用户端 APP 使用真实 deviceId 作为 ownerId，以便复用该 AI 的快乐星球状态与档案。
+     */
+    public String openSession(Integer userId, Integer roleId, String ownerId, String resumeSessionId) {
+        return openSession(userId, roleId, ownerId, resumeSessionId, true);
+    }
+
+    public String openSession(Integer userId, Integer roleId, String ownerId, String resumeSessionId, boolean sessionScoped) {
+        return openSession(userId, roleId, ownerId, resumeSessionId, sessionScoped, maxMessages);
+    }
+
+    public String openAppSession(Integer userId, Integer roleId, String ownerId, String resumeSessionId) {
+        return openSession(userId, roleId, ownerId, resumeSessionId, false, appMaxMessages);
+    }
+
+    private String openSession(Integer userId, Integer roleId, String ownerId, String resumeSessionId,
+                               boolean sessionScoped, int historyLimit) {
+        if (!StringUtils.hasText(ownerId)) {
+            throw new IllegalArgumentException("ownerId 不能为空");
+        }
 
         RoleBO role = roleService.getBO(roleId);
         if (role == null) {
@@ -87,13 +136,13 @@ public class WebChatService {
         // 初始化 Conversation：Web 场景始终按 sessionId 加载（新会话为空，续接会拉到历史）。
         Conversation conversation = MessageWindowConversation.builder()
                 .chatMemory(chatMemory)
-                .maxMessages(maxMessages)
+                .maxMessages(historyLimit)
                 .ownerId(ownerId)
                 .roleId(role.getRoleId())
                 .roleDesc(role.getRoleDesc())
                 .userId(userId)
                 .sessionId(sessionId)
-                .sessionScoped(true)
+                .sessionScoped(sessionScoped)
                 .build();
         conversations.put(sessionId, conversation);
 
@@ -101,8 +150,8 @@ public class WebChatService {
         ChatModel chatModel = chatModelFactory.getChatModel(role);
         chatModels.put(sessionId, chatModel);
 
-        log.info("Web 聊天会话已创建: sessionId={}, userId={}, roleId={}, resume={}",
-                sessionId, userId, roleId, StringUtils.hasText(resumeSessionId));
+        log.info("Web 聊天会话已创建: sessionId={}, userId={}, ownerId={}, roleId={}, resume={}, historyLimit={}",
+                sessionId, userId, ownerId, roleId, StringUtils.hasText(resumeSessionId), historyLimit);
         return sessionId;
     }
 
@@ -155,20 +204,25 @@ public class WebChatService {
         MessageTimeMetadata.setTimeMillis(userMessage, userInstant);
         conversation.add(userMessage);
 
+        long requestStartNanos = System.nanoTime();
+
         // Web 场景无位置
-        List<Message> messages = conversation.messages(ConversationContext.EMPTY);
+        List<Message> messages = conversation.messages(conversationContext(conversation, text));
 
         Prompt prompt = new Prompt(messages);
 
         StringBuilder fullResponse = new StringBuilder();
+        AtomicBoolean firstTokenLogged = new AtomicBoolean(false);
+        AtomicBoolean emittedContent = new AtomicBoolean(false);
+        boolean appConversation = isAppConversation(conversation);
 
-        return chatModel.stream(prompt)
+        Flux<ChatToken> rawModelTokens = chatModel.stream(prompt)
                 .mapNotNull(ChatResponse::getResult)
                 .mapNotNull(Generation::getOutput)
                 .flatMap(message -> {
                     List<ChatToken> tokens = new ArrayList<>();
                     Object reasoning = message.getMetadata().get("reasoningContent");
-                    if (reasoning instanceof String r && !r.isEmpty()) {
+                    if (!appConversation && reasoning instanceof String r && !r.isEmpty()) {
                         tokens.add(ChatToken.thinking(r));
                     }
                     String content = message.getText();
@@ -176,10 +230,41 @@ public class WebChatService {
                         tokens.add(ChatToken.content(content));
                     }
                     return Flux.fromIterable(tokens);
-                })
+                });
+
+        if (appConversation) {
+            Duration firstContentTimeout = Duration.ofSeconds(Math.max(1, appFirstContentTimeoutSeconds));
+            rawModelTokens = rawModelTokens
+                    .doOnNext(token -> {
+                        if (token.isContent()) {
+                            emittedContent.set(true);
+                        }
+                    })
+                    .takeUntilOther(Mono.delay(firstContentTimeout)
+                            .filter(ignored -> !emittedContent.get())
+                            .doOnNext(ignored -> log.warn(
+                                    "App 聊天 {} 秒内未收到正式内容，停止思考流并使用兜底回复: sessionId={}, text={}",
+                                    firstContentTimeout.toSeconds(), sessionId, abbreviate(text, 80))));
+        }
+
+        Flux<ChatToken> modelTokens = rawModelTokens
+                .concatWith(Flux.defer(() -> {
+                    if (emittedContent.get()) {
+                        return Flux.empty();
+                    }
+                    String fallback = fallbackReply(text);
+                    log.warn("模型流结束但未返回正式内容，使用 App 兜底回复: sessionId={}, text={}",
+                            sessionId, abbreviate(text, 80));
+                    return Flux.just(ChatToken.content(fallback));
+                }))
                 .doOnNext(token -> {
+                    if (firstTokenLogged.compareAndSet(false, true)) {
+                        log.info("Web 聊天首个模型 token: sessionId={}, cost={}ms, type={}",
+                                sessionId, elapsedMillis(requestStartNanos), token.type());
+                    }
                     // 只累积正式回复内容，思考过程不持久化
                     if (token.isContent()) {
+                        emittedContent.set(true);
                         fullResponse.append(token.text());
                     }
                 })
@@ -192,7 +277,46 @@ public class WebChatService {
                     // 持久化裸文本（元数据由 Conversation 投影层按需拼前缀，DB 保持干净）
                     persistTurn(conversation, text, userCreatedAt, reply, LocalDateTime.now());
                 })
+                .timeout(Duration.ofSeconds(45))
                 .doOnError(e -> log.error("Web 聊天流式响应失败: sessionId={}", sessionId, e));
+
+        return Flux.concat(
+                Flux.just(ChatToken.status("星球记忆已准备，正在生成回复...")),
+                modelTokens
+        );
+    }
+
+    private long elapsedMillis(long startNanos) {
+        return Duration.ofNanos(System.nanoTime() - startNanos).toMillis();
+    }
+
+    private boolean isAppConversation(Conversation conversation) {
+        String ownerId = conversation.getOwnerId();
+        return StringUtils.hasText(ownerId) && !ownerId.startsWith("web:");
+    }
+
+    private String fallbackReply(String text) {
+        String normalized = text == null ? "" : text.toLowerCase().replaceAll("\\s+", "");
+        if (normalized.contains("聊") || normalized.contains("陪我")) {
+            return "可以，我在。我们先不用聊很大的事，就从现在开始：你今天最想吐槽的，或者最想留住的一件小事是什么？";
+        }
+        if (normalized.contains("心情") || normalized.contains("难受") || normalized.contains("烦")) {
+            return "可以，我们慢慢整理。你先不用说得很完整，只要告诉我：现在这份心情更像累、烦、委屈，还是说不清楚？";
+        }
+        if (normalized.contains("任务")) {
+            return "好，给你一个很小的快乐任务：找一件今天还算顺眼的小事，把它用一句话告诉我。";
+        }
+        if (normalized.contains("星球码") || normalized.contains("绑定app") || normalized.contains("关联app")) {
+            return "这件事需要设备端生成星球码。你可以直接对设备说“绑定 APP”，我会把星球码读给你。";
+        }
+        return "我在。刚才模型没有返回有效内容，我们换个更直接的方式聊：你想先说发生了什么，还是只想让我陪你安静一会儿？";
+    }
+
+    private String abbreviate(String text, int maxLength) {
+        if (text == null || text.length() <= maxLength) {
+            return text;
+        }
+        return text.substring(0, maxLength) + "...";
     }
 
     /**
@@ -238,5 +362,13 @@ public class WebChatService {
      */
     public boolean hasSession(String sessionId) {
         return conversations.containsKey(sessionId);
+    }
+
+    public boolean isActiveSessionOwnedByUser(String sessionId, Integer userId) {
+        if (!StringUtils.hasText(sessionId) || userId == null) {
+            return false;
+        }
+        Conversation conversation = conversations.get(sessionId);
+        return conversation != null && userId.equals(conversation.getUserId());
     }
 }

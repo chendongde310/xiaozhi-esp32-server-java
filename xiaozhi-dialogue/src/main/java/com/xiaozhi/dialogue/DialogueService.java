@@ -7,10 +7,12 @@ import com.xiaozhi.common.model.bo.DeviceBO;
 import com.xiaozhi.common.model.bo.MessageBO;
 import com.xiaozhi.dialogue.audio.VadService;
 import com.xiaozhi.dialogue.llm.factory.PersonaFactory;
+import com.xiaozhi.dialogue.llm.tool.function.CreateAppLinkCodeFunction;
 import com.xiaozhi.ai.llm.memory.MessageTimeMetadata;
 import com.xiaozhi.ai.llm.service.IntentService;
 import com.xiaozhi.ai.stt.SttResult;
 import com.xiaozhi.common.model.bo.MessageMetadataBO;
+import com.xiaozhi.happyplanet.service.PlayerAgentService;
 import org.springframework.ai.chat.messages.UserMessage;
 import com.xiaozhi.dialogue.audio.VadService.VadStatus;
 import com.xiaozhi.dialogue.playback.Player;
@@ -69,6 +71,8 @@ public class DialogueService{
 
     @Resource
     private StorageServiceFactory storageServiceFactory;
+    @Resource
+    private PlayerAgentService playerAgentService;
 
     @org.springframework.context.event.EventListener
     public void onApplicationEvent(ChatAbortedEvent event) {
@@ -235,6 +239,10 @@ public class DialogueService{
 
             String text = sttResult.text();
 
+            if (tryHandleAppLinkIntent(session, persona, text)) {
+                return;
+            }
+
             UserMessage userMessage = buildUserMessage(text, sttResult);
 
             // 意图检测
@@ -263,6 +271,61 @@ public class DialogueService{
      * @param text     用户裸文本
      * @param sttResult STT 结果，可能含情绪信息
      */
+    private boolean tryHandleAppLinkIntent(ChatSession session, Persona persona, String text) {
+        if (!isAppLinkIntent(text)) {
+            return false;
+        }
+        DeviceBO device = session.getDevice();
+        String reply;
+        try {
+            if (device == null || !StringUtils.hasText(device.getDeviceId()) || device.getRoleId() == null) {
+                reply = "我现在还没有完成设备初始化，暂时不能生成 APP 星球码。";
+            } else {
+                PlayerAgentService.AgentLinkCode code =
+                        playerAgentService.createLinkCode(device.getDeviceId(), device.getRoleId());
+                reply = CreateAppLinkCodeFunction.linkCodeSpeech(code.code());
+            }
+        } catch (Exception e) {
+            log.warn("处理 APP 关联口令失败 - SessionId: {}", session.getSessionId(), e);
+            reply = "星球码暂时生成失败，等一下你再对我说一遍绑定 APP。";
+        }
+
+        Persona activePersona = persona != null ? persona : personaFactory.buildPersona(session);
+        if (activePersona != null && activePersona.getSynthesizer() != null) {
+            activePersona.getSynthesizer().synthesize(reply, "happy");
+        } else {
+            session.sendTextMessage(reply);
+        }
+        return true;
+    }
+
+    private static boolean isAppLinkIntent(String text) {
+        if (!StringUtils.hasText(text)) {
+            return false;
+        }
+        String normalized = text.toLowerCase(Locale.ROOT)
+                .replace(" ", "")
+                .replace("，", "")
+                .replace(",", "")
+                .replace("。", "")
+                .replace(".", "")
+                .replace("！", "")
+                .replace("!", "")
+                .replace("？", "")
+                .replace("?", "")
+                .replace("、", "");
+        return normalized.contains("绑定app")
+                || normalized.contains("绑定应用")
+                || normalized.contains("绑定手机")
+                || normalized.contains("关联app")
+                || normalized.contains("关联应用")
+                || normalized.contains("连接app")
+                || normalized.contains("连接应用")
+                || normalized.contains("生成星球码")
+                || normalized.contains("告诉我星球码")
+                || normalized.contains("星球码是多少");
+    }
+
     private static UserMessage buildUserMessage(String text, SttResult sttResult) {
         MessageMetadataBO metadataBO = MessageMetadataBO.builder()
                 .emotion(sttResult.hasEmotion() ? sttResult.emotion() : null)

@@ -71,4 +71,19 @@ public abstract class Synthesizer {
      * @param text 一般是完整的句子或者完整的可以一次性提交进行语音合成的文本。
      */
     abstract public void synthesize(String text);
+
+    /**
+     * 带情绪的流式合成。默认忽略情绪，等价于 {@link #synthesize(Flux)}；
+     * 支持情绪的实现（如流式大模型 TTS）覆写以驱动声音情绪，同时可将情绪透传到设备表情。
+     */
+    public void synthesize(Flux<String> stringFlux, String emotion) {
+        synthesize(stringFlux);
+    }
+
+    /**
+     * 带情绪的单句合成。默认忽略情绪，等价于 {@link #synthesize(String)}。
+     */
+    public void synthesize(String text, String emotion) {
+        synthesize(text);
+    }
 }

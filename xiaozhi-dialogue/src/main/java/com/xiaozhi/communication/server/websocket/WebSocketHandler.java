@@ -3,7 +3,9 @@ package com.xiaozhi.communication.server.websocket;
 import com.xiaozhi.communication.common.*;
 import com.xiaozhi.communication.domain.*;
 import com.xiaozhi.common.model.bo.DeviceBO;
+import com.xiaozhi.dialogue.happyplanet.ProactiveChatService;
 import com.xiaozhi.dialogue.llm.tool.mcp.device.DeviceMcpService;
+import com.xiaozhi.happyplanet.service.ProactiveConfigService;
 import com.xiaozhi.utils.JsonUtil;
 import jakarta.annotation.Resource;
 import org.springframework.stereotype.Component;
@@ -31,6 +33,12 @@ public class WebSocketHandler extends AbstractWebSocketHandler {
 
     @Resource
     private DeviceMcpService deviceMcpService;
+
+    @Resource
+    private ProactiveChatService proactiveChatService;
+
+    @Resource
+    private ProactiveConfigService proactiveConfigService;
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
@@ -152,11 +160,18 @@ public class WebSocketHandler extends AbstractWebSocketHandler {
                     message.getAudioParams().getFrameDuration());
         }
 
+        // 查询本设备的主动搭话开关，随 hello 响应回传，供设备同步本地自我唤醒策略
+        ChatSession helloSession = sessionManager.getSession(sessionId);
+        DeviceBO helloDevice = helloSession != null ? helloSession.getDevice() : null;
+        boolean proactiveEnabled = helloDevice != null && helloDevice.getRoleId() != null
+                && proactiveConfigService.isEnabled(helloDevice.getDeviceId(), helloDevice.getRoleId());
+
         // 回复hello消息
         var resp = new HelloMessageResp()
                 .setTransport("websocket")
                 .setSessionId(sessionId)
-                .setAudioParams(AudioParams.Opus);
+                .setAudioParams(AudioParams.Opus)
+                .setProactiveEnabled(proactiveEnabled);
 
         try {
             session.sendMessage(new TextMessage(JsonUtil.toJson(resp)));
@@ -169,6 +184,14 @@ public class WebSocketHandler extends AbstractWebSocketHandler {
                         deviceMcpService.initialize(chatSession);
                     }
                 });
+            }
+
+            // 记录本次连接的唤醒来源；若为设备待命自我唤醒(proactive)，触发主动开场决策
+            if (helloSession != null) {
+                helloSession.setWakeSource(message.getWakeSource());
+                if (ProactiveChatService.WAKE_SOURCE_PROACTIVE.equals(message.getWakeSource())) {
+                    proactiveChatService.maybeProactiveGreeting(helloSession);
+                }
             }
         } catch (Exception e) {
             log.error("发送hello响应失败", e);

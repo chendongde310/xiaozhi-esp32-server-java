@@ -1,10 +1,12 @@
 package com.xiaozhi.dialogue.runtime;
 
 import com.xiaozhi.common.model.ChatToken;
+import com.xiaozhi.common.model.bo.MessageMetadataBO;
 import com.xiaozhi.communication.common.ChatSession;
 import com.xiaozhi.communication.common.SessionManager;
 import com.xiaozhi.ai.llm.memory.Conversation;
 import com.xiaozhi.ai.llm.memory.ConversationContext;
+import com.xiaozhi.happyplanet.service.AgentRuntimeService;
 import com.xiaozhi.dialogue.playback.Player;
 import com.xiaozhi.dialogue.playback.Synthesizer;
 import com.xiaozhi.ai.stt.SttService;
@@ -24,11 +26,13 @@ import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.tool.ToolCallback;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Sinks;
 
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import lombok.extern.slf4j.Slf4j;
@@ -78,6 +82,12 @@ public class Persona {
      * 与LLM Provider通信的具体实现类
      */
     private ChatModel chatModel;
+
+    /**
+     * 快乐星球运行时编排：每轮推进能量/陪伴/任务并产出动态状态提示词。可为 null（非陪伴场景）。
+     */
+    private AgentRuntimeService agentRuntimeService;
+
     private GoodbyeMessageSupplier goodbyeMessages;
 
     @Getter
@@ -144,7 +154,18 @@ public class Persona {
         // 构建运行时上下文
         ChatSession currentSession = getSession();
         String location = currentSession.getDevice() != null ? currentSession.getDevice().getLocation() : null;
-        ConversationContext ctx = new ConversationContext(location);
+        // 快乐星球：动态状态提示词（作为稳定角色提示词之后的 SystemMessage 注入）。
+        // 仅真实用户对话（useFunctionCall=true）才推进能量/陪伴/任务；唤醒词、告别语等系统触发轮次只读取状态。
+        String agentStateText = null;
+        if (agentRuntimeService != null) {
+            String ownerId0 = conversation.getOwnerId();
+            Integer roleId0 = conversation.getRoleId();
+            agentStateText = useFunctionCall
+                    ? agentRuntimeService.buildTurnState(ownerId0, roleId0,
+                            userMessage.getText(), extractEmotion(userMessage))
+                    : agentRuntimeService.peekStatePrompt(ownerId0, roleId0);
+        }
+        ConversationContext ctx = new ConversationContext(location, agentStateText);
         List<Message> messages = conversation.messages(ctx);
         Prompt prompt = new Prompt(messages, chatOptions);
 
@@ -220,8 +241,61 @@ public class Persona {
         Instant now = Instant.now();
         Flux<ChatResponse> chatResponseFlux = chatStream(now, userMessage, useFunctionCall);
         Flux<ChatToken> tokenFlux = convert(chatResponseFlux);
-        // 设备对话管道：过滤掉思考内容，只将正式回复传给语音合成
-        synthesizer.synthesize(tokenFlux.filter(ChatToken::isContent).map(ChatToken::text));
+        // 设备对话管道：过滤掉思考内容，只将正式回复传给语音合成；
+        // 回复开头的 <e:xxx> 语气标记由 LLM 按内容/用户要求给出，此处解析为声音情绪并从朗读文本中剥离。
+        Flux<String> contentFlux = tokenFlux.filter(ChatToken::isContent).map(ChatToken::text);
+        speakWithEmotionTag(contentFlux);
+    }
+
+    /** 开头缓冲多少字符后再定情绪并开始合成（越大越能抓准情绪，越小首句越快）。 */
+    private static final int HEAD_DECIDE_LEN = 24;
+
+    /**
+     * 处理 LLM 回复流：先缓冲开头一小段用于推断情绪（{@code <e:xxx>} 标记或关键词），
+     * 再开一个带该情绪的合成会话；全程剥离括号旁白/动作/表情（否则会被 TTS 原样念出来）。
+     */
+    private void speakWithEmotionTag(Flux<String> contentFlux) {
+        Sinks.Many<String> cleaned = Sinks.many().unicast().onBackpressureBuffer();
+        AtomicBoolean started = new AtomicBoolean(false);
+        StringBuilder head = new StringBuilder();
+        SpeechTextProcessor filter = new SpeechTextProcessor();
+        contentFlux.subscribe(
+                token -> {
+                    if (started.get()) {
+                        String c = filter.strip(token);
+                        if (!c.isEmpty()) {
+                            cleaned.tryEmitNext(c);
+                        }
+                        return;
+                    }
+                    head.append(token);
+                    if (head.length() >= HEAD_DECIDE_LEN && started.compareAndSet(false, true)) {
+                        startSpeaking(cleaned, filter, head.toString());
+                    }
+                },
+                error -> {
+                    if (started.compareAndSet(false, true)) {
+                        startSpeaking(cleaned, filter, head.toString());
+                    }
+                    cleaned.tryEmitComplete();
+                },
+                () -> {
+                    if (started.compareAndSet(false, true)) {
+                        startSpeaking(cleaned, filter, head.toString());
+                    }
+                    cleaned.tryEmitComplete();
+                }
+        );
+    }
+
+    /** 依据开头缓冲文本定出情绪并开一个合成会话，随后发出去括号后的缓冲文本。 */
+    private void startSpeaking(Sinks.Many<String> cleaned, SpeechTextProcessor filter, String head) {
+        String emotion = SpeechTextProcessor.detectEmotion(head);
+        synthesizer.synthesize(cleaned.asFlux(), emotion);
+        String c = filter.strip(head);
+        if (!c.isEmpty()) {
+            cleaned.tryEmitNext(c);
+        }
     }
 
     /**
@@ -269,6 +343,17 @@ public class Persona {
             chat("我有事先忙了，再见！",false);
         }
 
+    }
+
+    /**
+     * 从 UserMessage.metadata 提取 STT 情感标签（若有），供快乐能量规则使用。
+     */
+    private static String extractEmotion(UserMessage userMessage) {
+        var meta = userMessage.getMetadata();
+        if (meta != null && meta.get(MessageMetadataBO.METADATA_KEY) instanceof MessageMetadataBO bo) {
+            return bo.getEmotion();
+        }
+        return null;
     }
 
     /**

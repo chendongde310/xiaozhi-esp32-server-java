@@ -115,4 +115,12 @@ public class DeviceServiceImpl implements DeviceService {
         return deviceMapper.updateCodeAudioPath(deviceId, sessionId, code, audioPath);
     }
 
+    @Override
+    public int consumeCode(String code, String deviceId, String sessionId, String type) {
+        if (!StringUtils.hasText(code)) {
+            return 0;
+        }
+        return deviceMapper.deleteVerifyCode(code, deviceId, sessionId, type);
+    }
+
 }

@@ -11,6 +11,9 @@ import com.xiaozhi.device.service.DeviceService;
 import com.xiaozhi.communication.message.MessageSender;
 import com.xiaozhi.dialogue.DialogueService;
 import com.xiaozhi.dialogue.audio.AecService;
+import com.xiaozhi.dialogue.happyplanet.HappyPlanetSpeaker;
+import com.xiaozhi.happyplanet.service.AgentStateService;
+import com.xiaozhi.happyplanet.service.GrowthService;
 import com.xiaozhi.ai.stt.SttResult;
 import com.xiaozhi.dialogue.llm.factory.PersonaFactory;
 import com.xiaozhi.ai.llm.factory.ChatModelFactory;
@@ -93,8 +96,20 @@ public class MessageHandler {
     @Resource
     private RedisBroadcast redisBroadcast;
 
+    @Resource
+    private AgentStateService agentStateService;
+
+    @Resource
+    private HappyPlanetSpeaker happyPlanetSpeaker;
+
+    @Resource
+    private GrowthService growthService;
+
     // 用于存储设备ID和验证码生成状态的映射
     private final Map<String, Boolean> captchaGenerationInProgress = new ConcurrentHashMap<>();
+
+    /** 首连仪式在音频通道就绪后播报的延迟（毫秒），等待 hello 握手与音频通道打开。 */
+    private static final long FIRST_CONNECT_RITUAL_DELAY_MS = 2200L;
 
     /**
      * 处理连接建立事件.
@@ -164,6 +179,70 @@ public class MessageHandler {
             }
         });
 
+        // 快乐星球：首次连接仪式（仅首连触发一次）
+        maybeFirstConnectRitual(chatSession, device);
+        // 快乐星球：重连成长仪式（羁绊阶段升级 / 陪伴纪念日，各里程碑只庆祝一次）
+        maybeGrowthRituals(chatSession, device);
+    }
+
+    /**
+     * 首次连接快乐星球的仪式：原子认领首连后，延迟播报开场台词并引导设置昵称。
+     * 仅首连触发一次；后续连接不再重复。
+     */
+    private void maybeFirstConnectRitual(ChatSession chatSession, DeviceBO device) {
+        Integer roleId = device.getRoleId();
+        String deviceId = device.getDeviceId();
+        if (roleId == null) {
+            return;
+        }
+        Thread.startVirtualThread(() -> {
+            try {
+                if (!agentStateService.claimFirstConnect(deviceId, roleId)) {
+                    return; // 此前已完成首连仪式
+                }
+                // 等待 hello 握手与音频通道打开后再播报开场
+                Thread.sleep(FIRST_CONNECT_RITUAL_DELAY_MS);
+                if (!chatSession.isAudioChannelOpen()) {
+                    return;
+                }
+                happyPlanetSpeaker.speakScenes(chatSession, "first_connect", "first_connect_nickname");
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            } catch (Exception e) {
+                log.warn("首连仪式执行失败 - DeviceId: {}", deviceId, e);
+            }
+        });
+    }
+
+    /**
+     * 重连时的成长仪式：认领并逐字播报应庆祝一次的羁绊阶段升级 / 陪伴纪念日。
+     *
+     * <p>幂等由 {@link GrowthService#claimConnectRituals} 通过持久化里程碑保证；新徽章只入库、
+     * 由 App 徽章墙呈现，不额外语音播报，避免与升级/纪念台词叠加成噪声。首连当天无里程碑，天然跳过。
+     */
+    private void maybeGrowthRituals(ChatSession chatSession, DeviceBO device) {
+        Integer roleId = device.getRoleId();
+        String deviceId = device.getDeviceId();
+        if (roleId == null) {
+            return;
+        }
+        Thread.startVirtualThread(() -> {
+            try {
+                Thread.sleep(FIRST_CONNECT_RITUAL_DELAY_MS + 800L);
+                if (!chatSession.isAudioChannelOpen()) {
+                    return;
+                }
+                GrowthService.RitualPlan plan = growthService.claimConnectRituals(deviceId, roleId);
+                if (plan.sceneKeys().isEmpty()) {
+                    return;
+                }
+                happyPlanetSpeaker.speakScenes(chatSession, plan.sceneKeys().toArray(new String[0]));
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            } catch (Exception e) {
+                log.warn("成长仪式执行失败 - DeviceId: {}", deviceId, e);
+            }
+        });
     }
 
     /**

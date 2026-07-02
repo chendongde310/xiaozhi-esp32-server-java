@@ -179,7 +179,9 @@ export function useChatSession() {
 
     try {
       for await (const token of chatStream(sessionId.value, text, currentAbort.signal)) {
-        if (token.type === 'thinking') {
+        if (token.type === 'status') {
+          continue
+        } else if (token.type === 'thinking') {
           assistantMsg.thinking = (assistantMsg.thinking || '') + token.text
         } else {
           // 思考阶段结束，标记为已完成

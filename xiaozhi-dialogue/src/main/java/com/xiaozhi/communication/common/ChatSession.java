@@ -111,6 +111,12 @@ public abstract class ChatSession {
     // ========== 超时断连标记 ==========
     private volatile boolean timeoutDisconnect;
 
+    /**
+     * 本次连接的唤醒来源（来自 hello 的 wake_source）："user"（默认）或 "proactive"（设备待命自我唤醒）。
+     * 用于判断服务端是否应主动开场（主动搭话）。
+     */
+    private volatile String wakeSource;
+
     // --------------------设备mcp-------------------------
     private DeviceMcpHolder deviceMcpHolder = new DeviceMcpHolder();
 

@@ -2,7 +2,6 @@ import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteRecordRaw } from 'vue-router'
 import MainLayout from '../layouts/MainLayout.vue'
 
-// 扩展 RouteMeta 类型
 declare module 'vue-router' {
   interface RouteMeta {
     title?: string
@@ -11,8 +10,8 @@ declare module 'vue-router' {
     isAdmin?: boolean
     parent?: string
     hideInMenu?: boolean
-    permission?: string // 单个权限
-    permissions?: string[] // 多个权限（任一即可）
+    permission?: string
+    permissions?: string[]
   }
 }
 
@@ -44,12 +43,18 @@ const routes: RouteRecordRaw[] = [
       requiresAuth: false,
     },
   },
-
-  // 主应用路由
+  {
+    path: '/app',
+    name: 'planet-app',
+    component: () => import('../views/PlanetAppView.vue'),
+    meta: {
+      title: '快乐星球',
+      requiresAuth: true,
+    },
+  },
   {
     path: '/',
     component: MainLayout,
-    // redirect: '/dashboard', // 在路由守卫中动态处理
     children: [
       {
         path: 'dashboard',
@@ -96,6 +101,17 @@ const routes: RouteRecordRaw[] = [
         },
       },
       {
+        path: 'happyplanet',
+        name: 'happyplanet',
+        component: () => import('../views/HappyPlanetProfileView.vue'),
+        meta: {
+          title: 'router.title.happyPlanet',
+          icon: 'SmileOutlined',
+          requiresAuth: true,
+          permission: 'system:role',
+        },
+      },
+      {
         path: 'template',
         name: 'template',
         component: () => import('../views/TemplateView.vue'),
@@ -105,7 +121,7 @@ const routes: RouteRecordRaw[] = [
           parent: 'router.parent.roleManagement',
           requiresAuth: true,
           permission: 'system:prompt-template',
-          hideInMenu: true
+          hideInMenu: true,
         },
       },
       {
@@ -130,7 +146,6 @@ const routes: RouteRecordRaw[] = [
           permission: 'system:role',
         },
       },
-      // 配置管理
       {
         path: 'config/model',
         name: 'config-model',
@@ -186,7 +201,6 @@ const routes: RouteRecordRaw[] = [
           permission: 'system:config',
         },
       },
-      // Web 聊天
       {
         path: 'chat',
         name: 'chat',
@@ -209,7 +223,6 @@ const routes: RouteRecordRaw[] = [
           permission: 'system:auth-role',
         },
       },
-      // 个人中心
       {
         path: 'setting/account',
         name: 'setting-account',
@@ -221,22 +234,8 @@ const routes: RouteRecordRaw[] = [
           permission: 'system:setting',
         },
       },
-      // 个人设置（暂时禁用）
-      // {
-      //   path: 'setting/config',
-      //   name: 'setting-config',
-      //   component: () => import('../views/setting/ConfigView.vue'),
-      //   meta: {
-      //     title: 'router.title.personalConfig',
-      //     parent: 'router.parent.settings',
-      //     requiresAuth: true,
-      //     permission: 'system:setting',
-      //   },
-      // },
     ],
   },
-
-  // 异常页面
   {
     path: '/403',
     name: '403',
@@ -255,8 +254,6 @@ const routes: RouteRecordRaw[] = [
       requiresAuth: false,
     },
   },
-
-  // 捕获所有未匹配的路由
   {
     path: '/:pathMatch(.*)*',
     redirect: '/404',

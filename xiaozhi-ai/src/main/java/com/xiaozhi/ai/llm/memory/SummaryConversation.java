@@ -229,6 +229,8 @@ public class SummaryConversation extends Conversation {
             // 多条SystemMessage在主流模型（OpenAI、Qwen、DeepSeek）中均已验证可用
             historyMessages.add(new SystemMessage("下面是你与用户最近聊天内容的摘要：\n" + summarySnapshot.getSummary()));
         }
+        // 动态状态（快乐能量/陪伴/频道/档案）注入在稳定角色提示词与摘要之后
+        dynamicStateSystemMessage(context).ifPresent(historyMessages::add);
         historyMessages.addAll(messageSnapshot);
         // UserMessage 按 metadata 装配带前缀的副本供 LLM 使用
         return historyMessages.stream().map(UserMessageAssembler::assemble).toList();

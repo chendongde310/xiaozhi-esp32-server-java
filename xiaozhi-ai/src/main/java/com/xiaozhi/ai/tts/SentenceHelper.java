@@ -42,6 +42,10 @@ public class SentenceHelper implements ChatConverter {
     // 最小句子长度（字符数）
     private static final int MIN_SENTENCE_LENGTH = 8;
 
+    // 逗号/顿号等"停顿标点"处才切句的最小长度：只有当句子已经很长时才在逗号处切分，
+    // 避免把一句话切成很多小碎片导致逐段合成、语音不连贯；正常的逗号停顿交给 TTS 引擎自身韵律处理。
+    private static final int PAUSE_SPLIT_LENGTH = 40;
+
     // 上下文缓冲区最大长度（用于数字小数点检测等上下文判断）
     private static final int CONTEXT_BUFFER_MAX_LENGTH = 20;
 
@@ -94,8 +98,11 @@ public class SentenceHelper implements ChatConverter {
             boolean shouldSendSentence = false;
             if (isEndMark || isNewline) {
                 shouldSendSentence = true;
-            } else if ((isPauseMark || isSpecialMark || isEmoji || containsKaomoji)
-                    && currentSentence.length() >= MIN_SENTENCE_LENGTH) {
+            } else if ((isEmoji || containsKaomoji) && currentSentence.length() >= MIN_SENTENCE_LENGTH) {
+                // 表情/颜文字处切句（用于情绪切换），保持较短阈值
+                shouldSendSentence = true;
+            } else if ((isPauseMark || isSpecialMark) && currentSentence.length() >= PAUSE_SPLIT_LENGTH) {
+                // 逗号/顿号等停顿：仅当句子过长时才在此切分，避免过度切碎导致语音不连贯
                 shouldSendSentence = true;
             }
 

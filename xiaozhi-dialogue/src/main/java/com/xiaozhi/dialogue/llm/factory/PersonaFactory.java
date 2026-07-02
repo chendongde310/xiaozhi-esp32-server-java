@@ -12,6 +12,7 @@ import com.xiaozhi.dialogue.playback.Player;
 import com.xiaozhi.dialogue.playback.ScheduledPlayer;
 import com.xiaozhi.dialogue.playback.Synthesizer;
 import com.xiaozhi.dialogue.playback.SynthesizerFactory;
+import com.xiaozhi.dialogue.playback.StreamingSynthesizer;
 import com.xiaozhi.dialogue.runtime.GoodbyeMessageSupplier;
 import com.xiaozhi.dialogue.runtime.Persona;
 import com.xiaozhi.ai.llm.factory.ChatModelFactory;
@@ -69,6 +70,8 @@ public class PersonaFactory {
     private DialogueListener dialogueListener;
     @Resource
     private StorageServiceFactory storageServiceFactory;
+    @Resource
+    private com.xiaozhi.happyplanet.service.AgentRuntimeService agentRuntimeService;
 
     /**
      * 构建完整的 Persona 实例。
@@ -127,6 +130,7 @@ public class PersonaFactory {
                 .toolCallbacks(toolCallbacks)
                 .listener(dialogueListener)
                 .goodbyeMessages(goodbyeMessages)
+                .agentRuntimeService(agentRuntimeService)
                 .build();
         session.setPersona(persona);
         return persona;
@@ -179,6 +183,20 @@ public class PersonaFactory {
         }
         String voiceName = role.getVoiceName();
         TtsService ttsService = ttsFactory.getTtsService(ttsConfig, voiceName, role.getTtsPitch(), role.getTtsSpeed());
+
+        // 火山引擎大模型音色（bigtts）优先走「双向流式 TTS」：边合成边播、支持声音情绪，体验更连贯自然。
+        // 任一环节不满足则回退到文件式合成，保证稳健。
+        if (ttsConfig != null && "volcengine".equalsIgnoreCase(ttsConfig.getProvider())
+                && ttsConfig.getAppId() != null && ttsConfig.getApiKey() != null
+                && voiceName != null && voiceName.contains("bigtts")) {
+            try {
+                var client = new com.xiaozhi.ai.tts.stream.VolcengineStreamTtsClient(
+                        ttsConfig.getAppId(), ttsConfig.getApiKey());
+                return new StreamingSynthesizer(session, ttsService, player, client, voiceName);
+            } catch (Exception e) {
+                log.warn("初始化火山流式TTS失败，回退到文件式合成 - Voice: {}", voiceName, e);
+            }
+        }
 
         return SynthesizerFactory.create(session, ttsService, player);
 

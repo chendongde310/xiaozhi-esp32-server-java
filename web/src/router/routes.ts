@@ -6,6 +6,7 @@ export const ROUTES = {
   LOGIN: '/login',
   REGISTER: '/register',
   FORGET: '/forget',
+  PLANET_APP: '/app',
   DASHBOARD: '/dashboard',
   DEVICE: '/device',
   ROLE: '/role',

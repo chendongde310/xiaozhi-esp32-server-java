@@ -70,6 +70,8 @@ public class MessageWindowConversation extends Conversation {
         if(roleSystemMessage.isPresent()){
             historyMessages.add(roleSystemMessage.get());
         }
+        // 动态状态（快乐能量/陪伴/频道/档案）作为稳定角色提示词之后的独立 SystemMessage 注入
+        dynamicStateSystemMessage(context).ifPresent(historyMessages::add);
         historyMessages.addAll(messages);
         // UserMessage 按 metadata 装配带前缀的副本供 LLM 使用
         return historyMessages.stream().map(UserMessageAssembler::assemble).toList();

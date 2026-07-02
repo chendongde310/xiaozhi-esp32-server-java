@@ -6,7 +6,7 @@
  * LLM 流式输出的 Token 单元，区分思考过程和正式回复
  */
 export interface ChatToken {
-  type: 'thinking' | 'content'
+  type: 'status' | 'thinking' | 'content'
   text: string
 }
 
