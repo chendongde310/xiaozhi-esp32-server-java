@@ -45,6 +45,8 @@ import java.util.concurrent.TimeUnit;
 public class ProactiveChatService {
 
     public static final String WAKE_SOURCE_PROACTIVE = "proactive";
+    /** 演示唤醒来源：绕过开关与护栏,无条件开场一次(现场演示用)。 */
+    public static final String WAKE_SOURCE_PROACTIVE_DEMO = "proactive_demo";
 
     /** 播报前的短暂延迟，等待 hello 握手与音频通道稳定（毫秒）。 */
     private static final long SPEAK_DELAY_MS = 1500L;
@@ -92,16 +94,25 @@ public class ProactiveChatService {
      * 幂等安全：任一护栏不通过即静默返回。
      */
     public void maybeProactiveGreeting(ChatSession session) {
+        scheduleGreeting(session, false);
+    }
+
+    /** 演示入口（wake_source=proactive_demo）：绕过开关与全部护栏,无条件开场一次,不计次,便于现场重复演示。 */
+    public void demoGreeting(ChatSession session) {
+        scheduleGreeting(session, true);
+    }
+
+    private void scheduleGreeting(ChatSession session, boolean demo) {
         scheduler.schedule(() -> {
             try {
-                doGreeting(session);
+                doGreeting(session, demo);
             } catch (Exception e) {
                 log.warn("主动搭话执行异常 - SessionId: {}", session != null ? session.getSessionId() : null, e);
             }
         }, SPEAK_DELAY_MS, TimeUnit.MILLISECONDS);
     }
 
-    private void doGreeting(ChatSession session) {
+    private void doGreeting(ChatSession session, boolean demo) {
         if (!ready(session)) {
             return;
         }
@@ -110,41 +121,47 @@ public class ProactiveChatService {
         Integer roleId = device.getRoleId();
 
         ProactiveConfigDO cfg = proactiveConfigService.find(deviceId, roleId);
-        if (cfg == null || !Integer.valueOf(1).equals(cfg.getEnabled())) {
+        if (cfg == null) {
+            cfg = new ProactiveConfigDO();
+        }
+        proactiveConfigService.applyDefaults(cfg);
+
+        // 常规模式才判开关；演示模式一律放行
+        if (!demo && !Integer.valueOf(1).equals(cfg.getEnabled())) {
             log.debug("主动搭话未开启，静默关闭自我唤醒连接 - SessionId: {}", session.getSessionId());
             closeQuietly(session);
             return;
         }
-        proactiveConfigService.applyDefaults(cfg);
 
         AgentStateDO state = agentStateService.getOrCreate(deviceId, roleId);
         LocalDateTime now = LocalDateTime.now();
         LocalDate today = now.toLocalDate();
         LocalTime nowTime = now.toLocalTime();
 
-        boolean sameDay = today.equals(state.getProactiveDate());
-        int todayCount = sameDay ? nz(state.getProactiveCount()) : 0;
-        boolean ignoredToday = sameDay && Integer.valueOf(1).equals(state.getProactiveIgnoredToday());
-        Long minutesSinceLast = null;
-        if (state.getLastProactiveTime() != null) {
-            long m = ChronoUnit.MINUTES.between(state.getLastProactiveTime(), now);
-            minutesSinceLast = Math.max(0, m);
+        // 常规模式才走时段/次数/冷却/退避护栏；演示模式跳过
+        if (!demo) {
+            boolean sameDay = today.equals(state.getProactiveDate());
+            int todayCount = sameDay ? nz(state.getProactiveCount()) : 0;
+            boolean ignoredToday = sameDay && Integer.valueOf(1).equals(state.getProactiveIgnoredToday());
+            Long minutesSinceLast = null;
+            if (state.getLastProactiveTime() != null) {
+                long m = ChronoUnit.MINUTES.between(state.getLastProactiveTime(), now);
+                minutesSinceLast = Math.max(0, m);
+            }
+            ProactiveGuard.Decision decision = ProactiveGuard.evaluate(
+                    true, nowTime,
+                    cfg.getActiveStart(), cfg.getActiveEnd(),
+                    cfg.getQuietStart(), cfg.getQuietEnd(),
+                    cfg.getDailyLimit(), todayCount, ignoredToday,
+                    cfg.getCooldownMinutes(), minutesSinceLast);
+            if (decision != ProactiveGuard.Decision.OK) {
+                log.info("主动搭话放弃({})，静默关闭 - SessionId: {}, deviceId: {}", decision, session.getSessionId(), deviceId);
+                closeQuietly(session);
+                return;
+            }
         }
 
-        ProactiveGuard.Decision decision = ProactiveGuard.evaluate(
-                true, nowTime,
-                cfg.getActiveStart(), cfg.getActiveEnd(),
-                cfg.getQuietStart(), cfg.getQuietEnd(),
-                cfg.getDailyLimit(), todayCount, ignoredToday,
-                cfg.getCooldownMinutes(), minutesSinceLast);
-
-        if (decision != ProactiveGuard.Decision.OK) {
-            log.info("主动搭话放弃({})，静默关闭 - SessionId: {}, deviceId: {}", decision, session.getSessionId(), deviceId);
-            closeQuietly(session);
-            return;
-        }
-
-        // 通过全部护栏：选择场景并播报
+        // 选择场景并播报
         String scene = chooseScene(nowTime.getHour(), state.getEnergy());
         boolean spoke = speak(session, scene, Integer.valueOf(1).equals(cfg.getAllowLlm()));
         if (!spoke) {
@@ -153,11 +170,14 @@ public class ProactiveChatService {
             return;
         }
 
+        if (demo) {
+            log.info("主动搭话[演示]已触发 - SessionId: {}, deviceId: {}, scene: {}", session.getSessionId(), deviceId, scene);
+            return;  // 演示不计次、不做忽略退避,便于重复演示
+        }
+
         Instant greetingAt = Instant.now();
         agentStateService.recordProactive(deviceId, roleId, now);
-        log.info("主动搭话已触发 - SessionId: {}, deviceId: {}, scene: {}, 当日第 {} 次",
-                session.getSessionId(), deviceId, scene, todayCount + 1);
-
+        log.info("主动搭话已触发 - SessionId: {}, deviceId: {}, scene: {}", session.getSessionId(), deviceId, scene);
         scheduleIgnoreCheck(session, deviceId, roleId, greetingAt, today);
     }
 

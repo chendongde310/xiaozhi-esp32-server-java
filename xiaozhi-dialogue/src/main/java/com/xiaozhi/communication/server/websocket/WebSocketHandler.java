@@ -186,10 +186,13 @@ public class WebSocketHandler extends AbstractWebSocketHandler {
                 });
             }
 
-            // 记录本次连接的唤醒来源；若为设备待命自我唤醒(proactive)，触发主动开场决策
+            // 记录本次连接的唤醒来源；proactive=常规护栏决策, proactive_demo=演示无条件开场
             if (helloSession != null) {
-                helloSession.setWakeSource(message.getWakeSource());
-                if (ProactiveChatService.WAKE_SOURCE_PROACTIVE.equals(message.getWakeSource())) {
+                String ws = message.getWakeSource();
+                helloSession.setWakeSource(ws);
+                if (ProactiveChatService.WAKE_SOURCE_PROACTIVE_DEMO.equals(ws)) {
+                    proactiveChatService.demoGreeting(helloSession);
+                } else if (ProactiveChatService.WAKE_SOURCE_PROACTIVE.equals(ws)) {
                     proactiveChatService.maybeProactiveGreeting(helloSession);
                 }
             }
