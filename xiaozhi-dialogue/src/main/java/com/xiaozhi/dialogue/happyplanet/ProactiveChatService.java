@@ -5,6 +5,7 @@ import com.xiaozhi.communication.common.ChatSession;
 import com.xiaozhi.communication.common.SessionManager;
 import com.xiaozhi.dialogue.llm.factory.PersonaFactory;
 import com.xiaozhi.dialogue.runtime.Persona;
+import com.xiaozhi.enums.DeviceState;
 import com.xiaozhi.happyplanet.dal.mysql.dataobject.AgentStateDO;
 import com.xiaozhi.happyplanet.dal.mysql.dataobject.ProactiveConfigDO;
 import com.xiaozhi.happyplanet.dal.mysql.dataobject.ScriptLineDO;
@@ -205,7 +206,13 @@ public class ProactiveChatService {
      * @return 是否成功产生了开场内容
      */
     private boolean speak(ChatSession session, String scene, boolean allowLlm) {
-        if (allowLlm && SCENE_INVITE.equals(scene)) {
+        // 关键：先把服务端会话置为 SPEAKING（对齐唤醒词响应流程 handleWakeWord），
+        // 在主动开场期间忽略 VAD，避免设备开着的麦(“聆听中”)抢占、导致只聆听不开口。
+        session.transitionTo(DeviceState.SPEAKING);
+
+        // 优先让 LLM 生成一句自然开场：等价于“模拟一次用户输入让 AI 回复”，
+        // 是设备“主动开口”的可靠路径（与唤醒词 chat(text,false) 同一机制）。
+        if (allowLlm) {
             try {
                 Persona persona = personaFactory.buildPersona(session);
                 if (persona != null) {
@@ -213,10 +220,10 @@ public class ProactiveChatService {
                     return true;
                 }
             } catch (Exception e) {
-                log.warn("LLM 增强开场失败，回退脚本台词 - scene: {}", scene, e);
+                log.warn("LLM 主动开场失败，回退脚本台词 - scene: {}", scene, e);
             }
-            // 回退脚本
         }
+        // 回退：脚本台词逐字播报（与首连仪式同一合成路径）
         ScriptLineDO line = scriptLineService.randomLine(scene);
         if (line == null) {
             return false;
