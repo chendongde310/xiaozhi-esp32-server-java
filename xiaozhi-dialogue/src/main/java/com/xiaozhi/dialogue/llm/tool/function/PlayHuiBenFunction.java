@@ -3,6 +3,7 @@ package com.xiaozhi.dialogue.llm.tool.function;
 import cn.hutool.core.map.MapUtil;
 import cn.hutool.core.util.RandomUtil;
 import com.xiaozhi.communication.common.ChatSession;
+import com.xiaozhi.communication.common.SessionManager;
 import com.xiaozhi.dialogue.runtime.Persona;
 import com.xiaozhi.ai.llm.tool.ToolCallStringResultConverter;
 import com.xiaozhi.ai.tool.ToolsGlobalRegistry;
@@ -13,6 +14,7 @@ import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.function.FunctionToolCallback;
 import org.springframework.ai.tool.metadata.ToolMetadata;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
@@ -31,9 +33,13 @@ public class PlayHuiBenFunction implements ToolsGlobalRegistry.GlobalFunction {
             Runtime.getRuntime().availableProcessors(),
             Thread.ofVirtual().name("huiBen-scheduler-", 0).factory());
 
+    @Autowired
+    private SessionManager sessionManager;
+
     ToolCallback toolCallback = FunctionToolCallback
             .builder(TOOL_NAME, (Map<String, String> params, ToolContext toolContext) -> {
-                ChatSession chatSession = (ChatSession) toolContext.getContext().get(Persona.TOOL_CONTEXT_SESSION_ID_KEY);
+                String sessionId = (String) toolContext.getContext().get(Persona.TOOL_CONTEXT_SESSION_ID_KEY);
+                ChatSession chatSession = sessionManager.getSession(sessionId);
                 Integer num = MapUtil.getInt(params, "num");
                 try {
                     if (num == null || num < 5 || num > 1100) {

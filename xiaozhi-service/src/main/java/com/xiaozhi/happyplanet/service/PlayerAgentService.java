@@ -60,6 +60,18 @@ public class PlayerAgentService {
                 .last("LIMIT 1"));
     }
 
+    /**
+     * 反查绑定到某设备+角色的玩家账号ID（声纹识别用：设备语音 → 绑定玩家 → 该玩家声纹）。
+     * 无绑定返回 null。
+     */
+    public Integer findPlayerUserId(String deviceId, Integer roleId) {
+        if (!StringUtils.hasText(deviceId) || roleId == null) {
+            return null;
+        }
+        PlayerAgentDO link = findActiveByAgent(deviceId, roleId);
+        return link != null ? link.getUserId() : null;
+    }
+
     public PlayerAgentDO getLinkedByDevice(Integer userId, String deviceId) {
         if (userId == null || !StringUtils.hasText(deviceId)) {
             return null;

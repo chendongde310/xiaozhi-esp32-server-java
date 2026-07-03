@@ -1,6 +1,7 @@
 package com.xiaozhi.dialogue.llm.tool.function;
 
 import com.xiaozhi.communication.common.ChatSession;
+import com.xiaozhi.communication.common.SessionManager;
 import com.xiaozhi.dialogue.runtime.Persona;
 import com.xiaozhi.ai.tool.ToolsGlobalRegistry;
 import com.xiaozhi.ai.tool.session.ToolSession;
@@ -32,10 +33,13 @@ public class PlayMusicFunction implements ToolsGlobalRegistry.GlobalFunction {
             Thread.ofVirtual().name("music-scheduler-", 0).factory());
     @Autowired
     private MessageSender messageService;
+    @Autowired
+    private SessionManager sessionManager;
 
     ToolCallback toolCallback = FunctionToolCallback
             .builder(TOOL_NAME, (Map<String, String> params, ToolContext toolContext) -> {
-                ChatSession chatSession = (ChatSession)toolContext.getContext().get(Persona.TOOL_CONTEXT_SESSION_ID_KEY);
+                String sessionId = (String) toolContext.getContext().get(Persona.TOOL_CONTEXT_SESSION_ID_KEY);
+                ChatSession chatSession = sessionManager.getSession(sessionId);
                 String songName = params.get("songName");
                 try{
                     if (songName == null || songName.isEmpty()) {

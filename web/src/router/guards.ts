@@ -60,7 +60,9 @@ export function setupRouterGuards(router: Router) {
 
     // 2.1 处理根路径重定向（根据用户类型跳转到不同首页）
     if (to.path === '/') {
-      const defaultPath = isAdmin ? ROUTES.DASHBOARD : ROUTES.DEVICE
+      const defaultPath = import.meta.env.VITE_MOBILE_APP === 'true'
+        ? ROUTES.PLANET_APP
+        : isAdmin ? ROUTES.DASHBOARD : ROUTES.DEVICE
       next({ path: defaultPath })
       NProgress.done()
       return

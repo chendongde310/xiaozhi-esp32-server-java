@@ -56,24 +56,36 @@ public final class UserMessageAssembler {
         Instant timestamp = meta != null && meta.get(ChatMemory.TIME_MILLIS_KEY) instanceof Instant i ? i : null;
         MessageMetadataBO bo = meta != null && meta.get(MessageMetadataBO.METADATA_KEY) instanceof MessageMetadataBO b
                 ? b : null;
+        String speaker = bo != null ? bo.getSpeaker() : null;
         String emotion = bo != null ? bo.getEmotion() : null;
-        if (timestamp == null && !StringUtils.hasText(emotion)) {
+        if (timestamp == null && !StringUtils.hasText(speaker) && !StringUtils.hasText(emotion)) {
             return um;
         }
         return UserMessage.builder()
-                .text(assemble(um.getText(), timestamp, emotion))
+                .text(assemble(um.getText(), timestamp, speaker, emotion))
                 .metadata(meta == null ? new HashMap<>() : new HashMap<>(meta))
                 .build();
     }
 
     /**
-     * 低阶：纯字符串拼接，外部一般不直接用。
+     * 低阶：纯字符串拼接（无说话人）。保留兼容旧调用。
      */
     public static String assemble(String text, Instant timestamp, String emotion) {
+        return assemble(text, timestamp, null, emotion);
+    }
+
+    /**
+     * 低阶：纯字符串拼接，外部一般不直接用。
+     * 顺序固定：时间戳 → 说话人 → 情绪；任一缺省跳过对应方括号。
+     */
+    public static String assemble(String text, Instant timestamp, String speaker, String emotion) {
         StringBuilder sb = new StringBuilder();
         if (timestamp != null) {
             LocalDateTime ldt = LocalDateTime.ofInstant(timestamp, ZoneId.systemDefault());
             sb.append('[').append(ldt.format(TIMESTAMP_FORMATTER)).append(']');
+        }
+        if (StringUtils.hasText(speaker)) {
+            sb.append("[说话人:").append(speaker).append(']');
         }
         if (StringUtils.hasText(emotion)) {
             sb.append('[').append(emotion).append(']');

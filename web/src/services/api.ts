@@ -53,6 +53,11 @@ export default {
     update: '/template',
     delete: '/template',
   },
+  growthPrompt: {
+    query: '/growth-prompt',
+    save: '/growth-prompt',
+    reset: '/growth-prompt',
+  },
   message: {
     query: '/message',
     update: '/message',

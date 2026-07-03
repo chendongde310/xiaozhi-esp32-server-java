@@ -10,7 +10,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -42,8 +44,13 @@ public class AgentRuntimeService {
     private BadgeService badgeService;
     @Resource
     private EnergyLogService energyLogService;
+    @Resource
+    private GrowthPromptService growthPromptService;
 
     private static final DateTimeFormatter MD = DateTimeFormatter.ofPattern("MM-dd");
+
+    /** 距上次聊天达到此天数即视为「久别重逢」，注入重逢语气槽位。 */
+    private static final int REUNION_GAP_DAYS = 3;
 
     /**
      * 处理一轮用户输入并返回注入系统提示词的"动态状态"文本。
@@ -57,9 +64,11 @@ public class AgentRuntimeService {
         }
         try {
             AgentStateDO state = agentStateService.getOrCreate(deviceId, roleId);
+            // 必须在 recordInteraction 之前捕获：它会把 lastInteractDate 改写为今天，随后无法据此判断久别。
+            LocalDate prevInteractDate = state.getLastInteractDate();
             int delta = energyService.deltaForTurn(userText, emotion);
             agentStateService.recordInteraction(state, delta, DEFAULT_AUDIENCE);
-            return renderStatePrompt(deviceId, roleId, state);
+            return renderStatePrompt(deviceId, roleId, state, prevInteractDate);
         } catch (Exception e) {
             log.warn("构建动态状态提示词失败 deviceId={}, roleId={}", deviceId, roleId, e);
             return null;
@@ -102,62 +111,128 @@ public class AgentRuntimeService {
             return null;
         }
         AgentStateDO state = agentStateService.getOrCreate(deviceId, roleId);
-        return renderStatePrompt(deviceId, roleId, state);
+        // 只读场景：状态未推进，lastInteractDate 即真实的上次互动日，可直接用于久别判断。
+        return renderStatePrompt(deviceId, roleId, state, state.getLastInteractDate());
     }
 
-    private String renderStatePrompt(String deviceId, Integer roleId, AgentStateDO state) {
+    /**
+     * 组装每轮注入 LLM 的「动态状态提示词」。文案全部来自可按角色编辑的成长提示词槽位
+     * （{@link GrowthPromptSlot} 定义默认，{@link GrowthPromptService} 分层覆盖）；本方法只负责
+     * 依据实时状态判定注入哪些槽位、并提供占位变量。
+     *
+     * @param prevInteractDate 本轮之前的上次互动日（用于久别重逢判断），可为 null（从未互动）。
+     */
+    private String renderStatePrompt(String deviceId, Integer roleId, AgentStateDO state, LocalDate prevInteractDate) {
         int energy = state.getEnergy() == null ? EnergyService.DEFAULT_ENERGY : state.getEnergy();
-        StringBuilder sb = new StringBuilder();
-        sb.append("【当前陪伴状态】（仅供你把握语气与内容，不要机械复述这些数据）\n");
-        sb.append("- 快乐能量：").append(energy).append("/100（").append(energyService.moodWord(energy)).append("）。");
-        if (energyService.isLow(energy)) {
-            sb.append("用户此刻可能有点累或情绪偏低，多一点耐心和安静的陪伴，别急着让对方开心，先陪着。");
-        } else if ("high".equals(energyService.level(energy))) {
-            sb.append("氛围不错，可以更轻松一点，适度分享一点小快乐。");
-        }
-        sb.append('\n');
-
         int days = state.getCompanionDays() == null ? 0 : state.getCompanionDays();
-        if (days > 0) {
-            sb.append("- 你们已经相伴第 ").append(days).append(" 天。\n");
-        }
-
-        CompanionStage stage = CompanionStage.fromDays(days);
-        sb.append("- 你们的关系阶段：").append(stage.label()).append("。").append(stageTone(stage)).append('\n');
-
         int streak = state.getStreakDays() == null ? 0 : state.getStreakDays();
-        if (streak >= 2) {
-            sb.append("- TA 已连续完成 ").append(streak)
-                    .append(" 天星球任务，可以在合适时机真诚地肯定这份坚持，但不必每轮都提、更不要施压。\n");
-        }
-
-        sb.append("- 当前频道：").append(channelLabel(state.getCurrentChannel()))
-                .append("。").append(channelTone(state.getCurrentChannel())).append('\n');
-
-        String taskText = currentTaskText(state);
-        if (StringUtils.hasText(taskText)) {
-            boolean done = Integer.valueOf(1).equals(state.getCurrentTaskDone());
-            sb.append("- 今日星球任务：").append(taskText).append("（")
-                    .append(done ? "已完成" : "未完成").append("）。");
-            if (!done) {
-                sb.append("如果时机合适可以轻轻地邀请对方完成，但对方没兴趣就不要勉强，更不要反复催促。");
-            }
-            sb.append('\n');
-        }
-
+        CompanionStage stage = CompanionStage.fromDays(days);
+        String channel = state.getCurrentChannel();
         Map<String, String> profile = agentProfileService.map(deviceId, roleId);
-        if (!profile.isEmpty()) {
-            sb.append("- 你已经记住的TA：").append(describeProfile(profile))
-                    .append("。请自然地体现这些了解，不要生硬罗列。\n");
+        String taskText = currentTaskText(state);
+        boolean taskDone = Integer.valueOf(1).equals(state.getCurrentTaskDone());
+
+        long gapDays = prevInteractDate == null ? 0 : ChronoUnit.DAYS.between(prevInteractDate, LocalDate.now());
+        boolean firstMeet = days <= 1 && profile.isEmpty();
+        boolean reunion = !firstMeet && gapDays >= REUNION_GAP_DAYS;
+
+        Map<String, String> vars = new HashMap<>();
+        vars.put("energy", String.valueOf(energy));
+        vars.put("energyMood", energyService.moodWord(energy));
+        vars.put("days", String.valueOf(days));
+        vars.put("stageLabel", stage.label());
+        vars.put("streak", String.valueOf(streak));
+        vars.put("gapDays", String.valueOf(gapDays));
+        if (StringUtils.hasText(taskText)) {
+            vars.put("taskText", taskText);
         }
-        sb.append("\n【说话语气·重要】你的回复会用带情感的声音合成播放，务必遵守：\n")
-                .append("1) 绝对不要写任何括号旁白/动作/神态/心理描写，例如（轻声）（哽咽）（微笑）【难过地】[小声] 等——")
-                .append("这些会被原样朗读出来、非常出戏。情绪只能通过“措辞和语气词”来表达：难过就“呜呜……”、")
-                .append("开心就“哈哈”、惊讶就“哇”、生气就语气重一点，拖长情绪用“……”。\n")
-                .append("2) 可在回复最开头加一个情绪标记 <e:xxx>（xxx 从 happy/sad/angry/surprised/excited/neutral 中选），")
-                .append("依据你要说的内容与用户是否要求了语气来选（“带哭腔/难过点”→sad，“开心点”→happy，")
-                .append("“温柔点/安静点/别激动”→neutral，“惊喜一下”→surprised）。该标记会被系统删除，不会朗读也不显示。\n");
-        return sb.toString();
+        if (!profile.isEmpty()) {
+            vars.put("profileText", describeProfile(profile));
+        }
+
+        GrowthPromptService.Renderer r = growthPromptService.renderer(roleId);
+        List<String> parts = new ArrayList<>();
+
+        addPart(parts, r.render(GrowthPromptSlot.STATE_HEADER, vars));
+
+        GrowthPromptSlot energySlot = energyService.isLow(energy) ? GrowthPromptSlot.ENERGY_LOW
+                : "high".equals(energyService.level(energy)) ? GrowthPromptSlot.ENERGY_HIGH
+                : GrowthPromptSlot.ENERGY_MID;
+        addPart(parts, r.render(energySlot, vars));
+
+        addPart(parts, r.render(stageSlot(stage), vars));
+
+        // 显式频道覆盖时间段默认；无显式频道则按服务器时间选时间段语气。
+        GrowthPromptSlot ambientSlot = channelSlot(channel);
+        if (ambientSlot == null) {
+            ambientSlot = timeSlot(LocalTime.now());
+        }
+        addPart(parts, r.render(ambientSlot, vars));
+
+        if (firstMeet) {
+            addPart(parts, r.render(GrowthPromptSlot.EVENT_FIRST_MEET, vars));
+        } else if (reunion) {
+            addPart(parts, r.render(GrowthPromptSlot.EVENT_REUNION, vars));
+        }
+
+        if (streak >= 2) {
+            addPart(parts, r.render(GrowthPromptSlot.HINT_STREAK, vars));
+        }
+
+        if (StringUtils.hasText(taskText) && !taskDone) {
+            addPart(parts, r.render(GrowthPromptSlot.HINT_TASK, vars));
+        }
+
+        if (!profile.isEmpty()) {
+            addPart(parts, r.render(GrowthPromptSlot.HINT_PROFILE, vars));
+        }
+
+        addPart(parts, r.render(GrowthPromptSlot.TTS_RULES, vars));
+
+        return String.join("\n", parts);
+    }
+
+    private static void addPart(List<String> parts, String s) {
+        if (StringUtils.hasText(s)) {
+            parts.add(s);
+        }
+    }
+
+    private static GrowthPromptSlot stageSlot(CompanionStage stage) {
+        return switch (stage) {
+            case ACQUAINTED -> GrowthPromptSlot.STAGE_ACQUAINTED;
+            case FAMILIAR -> GrowthPromptSlot.STAGE_FAMILIAR;
+            case OLD_FRIEND -> GrowthPromptSlot.STAGE_OLDFRIEND;
+            case SOULMATE -> GrowthPromptSlot.STAGE_SOULMATE;
+        };
+    }
+
+    /** 显式频道对应的槽位；日间/无频道返回 null（改用时间段语气）。 */
+    private static GrowthPromptSlot channelSlot(String channel) {
+        if (channel == null) {
+            return null;
+        }
+        return switch (channel) {
+            case AgentStateService.CHANNEL_NIGHT -> GrowthPromptSlot.CHANNEL_NIGHT;
+            case AgentStateService.CHANNEL_CHILDHOOD -> GrowthPromptSlot.CHANNEL_CHILDHOOD;
+            case AgentStateService.CHANNEL_ENERGY_REPAIR -> GrowthPromptSlot.CHANNEL_ENERGY_REPAIR;
+            default -> null;
+        };
+    }
+
+    /** 服务器本地时间映射到时间段槽位。 */
+    private static GrowthPromptSlot timeSlot(LocalTime now) {
+        int h = now.getHour();
+        if (h >= 5 && h < 11) {
+            return GrowthPromptSlot.TIME_MORNING;
+        }
+        if (h >= 11 && h < 18) {
+            return GrowthPromptSlot.TIME_DAY;
+        }
+        if (h >= 18 && h < 22) {
+            return GrowthPromptSlot.TIME_EVENING;
+        }
+        return GrowthPromptSlot.TIME_NIGHT;
     }
 
     public String currentTaskText(AgentStateDO state) {
@@ -191,21 +266,6 @@ public class AgentRuntimeService {
             case AgentStateService.CHANNEL_CHILDHOOD -> "童年频道";
             case AgentStateService.CHANNEL_ENERGY_REPAIR -> "能量修复频道";
             default -> "日间陪伴";
-        };
-    }
-
-    private String channelTone(String channel) {
-        if (channel == null) {
-            return "";
-        }
-        return switch (channel) {
-            case AgentStateService.CHANNEL_NIGHT ->
-                    "语气更轻更慢，句子更短，不讲大道理、不做复杂任务，适合睡前安静陪伴。";
-            case AgentStateService.CHANNEL_CHILDHOOD ->
-                    "带一点怀旧和温柔，可以说“换一种方式继续陪你”，但绝不扮演任何原剧角色、不复述原剧台词或剧情。";
-            case AgentStateService.CHANNEL_ENERGY_REPAIR ->
-                    "把节奏放慢，先共情再陪伴，给对方“安静一会儿”或“聊两句”的选择权。";
-            default -> "";
         };
     }
 
@@ -324,15 +384,6 @@ public class AgentRuntimeService {
             curve.add(point);
         }
         return curve;
-    }
-
-    private String stageTone(CompanionStage stage) {
-        return switch (stage) {
-            case ACQUAINTED -> "还在相互熟悉，语气礼貌温暖、不越界，多倾听。";
-            case FAMILIAR -> "已经有点熟了，可以更自在、带点小玩笑，但仍不黏人。";
-            case OLD_FRIEND -> "是老朋友了，有些默契不用从头解释，可自然地关心近况。";
-            case SOULMATE -> "是最亲近的星球密友，可温柔而笃定地陪伴，但绝不诱导依赖、不说“只有我懂你”。";
-        };
     }
 
     private int nz(Integer v) {

@@ -128,6 +128,16 @@ xiaozhi:
   check:
     inactive:
       session: true
+  # 讯飞声纹识别（新版 s1aa729d0）。凭证用环境变量覆盖以便轮换：
+  # XFYUN_VOICEPRINT_APPID / _APIKEY / _APISECRET
+  voiceprint:
+    enabled: ${XFYUN_VOICEPRINT_ENABLED:true}
+    app-id: ${XFYUN_VOICEPRINT_APPID:50e22550}
+    api-key: ${XFYUN_VOICEPRINT_APIKEY:acb62fd434f90a2ed250286273c3984e}
+    api-secret: ${XFYUN_VOICEPRINT_APISECRET:NTdhNTVhZTQ1ZDk3OWQ5NTFjYmFiN2Iz}
+    group-id: ${XFYUN_VOICEPRINT_GROUP:xiaozhi_voiceprint}
+    threshold: ${XFYUN_VOICEPRINT_THRESHOLD:0.6}
+    min-audio-millis: 600
 
 # ============================================================
 # SpringDoc OpenAPI 配置

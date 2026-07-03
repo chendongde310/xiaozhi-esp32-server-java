@@ -14,7 +14,12 @@ import {
   type AgentProfileView,
   type PlayerCodeView,
 } from '@/services/agentProfile'
-import { getProactiveConfig, toggleProactive, type ProactiveConfig } from '@/services/proactive'
+import {
+  getProactiveConfig,
+  toggleProactive,
+  saveProactiveConfig,
+  type ProactiveConfig,
+} from '@/services/proactive'
 
 const { t } = useI18n()
 
@@ -41,6 +46,65 @@ const seeding = ref(false)
 // 待命主动搭话
 const proactiveConfig = ref<ProactiveConfig | null>(null)
 const proactiveLoading = ref(false)
+const proactiveSaving = ref(false)
+
+/** 各可控变量的默认值（与后端 ProactiveConfigService 默认常量对齐，仅用于“恢复默认”）。 */
+const PROACTIVE_DEFAULTS = {
+  allowLlm: 1,
+  dailyLimit: 3,
+  cooldownMinutes: 90,
+  minIdleSeconds: 600,
+  activeStart: '09:00',
+  activeEnd: '21:00',
+  quietStart: '22:00',
+  quietEnd: '08:00',
+}
+
+/** 可编辑的策略参数草稿（不含 enabled，开关仍由上方 a-switch 单独管理）。 */
+const proactiveForm = reactive({ ...PROACTIVE_DEFAULTS })
+
+/** 后端时间可能带秒（HH:mm:ss），时间选择器只认 HH:mm，统一裁剪。 */
+const toHm = (s?: string | null) => (s ? s.slice(0, 5) : '')
+
+/**
+ * 活跃 / 静默时段的区间选择器桥接。a-time-range-picker 的 value 类型基于 Dayjs，
+ * 但配了 value-format=HH:mm 后运行时收发的是字符串，二者存在类型缺口——故此处用宽松类型，
+ * 真实数据仍以 proactiveForm 中的字符串强类型保存。
+ */
+const activeRange = computed<any>({
+  get: () => [proactiveForm.activeStart, proactiveForm.activeEnd],
+  set: (v: string[]) => {
+    proactiveForm.activeStart = v?.[0] ?? ''
+    proactiveForm.activeEnd = v?.[1] ?? ''
+  },
+})
+const quietRange = computed<any>({
+  get: () => [proactiveForm.quietStart, proactiveForm.quietEnd],
+  set: (v: string[]) => {
+    proactiveForm.quietStart = v?.[0] ?? ''
+    proactiveForm.quietEnd = v?.[1] ?? ''
+  },
+})
+
+/** 用服务端返回的配置回填草稿（时间裁剪为 HH:mm）。 */
+function hydrateProactiveForm(cfg: ProactiveConfig) {
+  proactiveForm.allowLlm = cfg.allowLlm ?? PROACTIVE_DEFAULTS.allowLlm
+  proactiveForm.dailyLimit = cfg.dailyLimit ?? PROACTIVE_DEFAULTS.dailyLimit
+  proactiveForm.cooldownMinutes = cfg.cooldownMinutes ?? PROACTIVE_DEFAULTS.cooldownMinutes
+  proactiveForm.minIdleSeconds = cfg.minIdleSeconds ?? PROACTIVE_DEFAULTS.minIdleSeconds
+  proactiveForm.activeStart = toHm(cfg.activeStart) || PROACTIVE_DEFAULTS.activeStart
+  proactiveForm.activeEnd = toHm(cfg.activeEnd) || PROACTIVE_DEFAULTS.activeEnd
+  proactiveForm.quietStart = toHm(cfg.quietStart) || PROACTIVE_DEFAULTS.quietStart
+  proactiveForm.quietEnd = toHm(cfg.quietEnd) || PROACTIVE_DEFAULTS.quietEnd
+}
+
+/** 最短待命时长以分钟展示，保存时换算回秒。 */
+const minIdleMinutes = computed<number>({
+  get: () => Math.round((proactiveForm.minIdleSeconds ?? 0) / 60),
+  set: (v) => {
+    proactiveForm.minIdleSeconds = Math.max(0, Math.round((v ?? 0) * 60))
+  },
+})
 
 const selectedAgent = computed(() =>
   agents.value.find((a) => `${a.deviceId}::${a.roleId}` === selectedKey.value),
@@ -134,10 +198,60 @@ async function fetchProactive() {
     const res = await getProactiveConfig(agent.deviceId, agent.roleId)
     if (res.code === 200) {
       proactiveConfig.value = res.data
+      if (res.data) hydrateProactiveForm(res.data)
     }
   } catch (e) {
     console.error('加载主动搭话配置失败:', e)
   }
+}
+
+/** 保存全部策略参数（不含总开关）。校验：时段两端不可相同。 */
+async function saveProactive() {
+  const agent = selectedAgent.value
+  if (!agent) return
+  if (proactiveForm.activeStart === proactiveForm.activeEnd) {
+    message.warning('活跃时段的开始与结束不能相同')
+    return
+  }
+  if (proactiveForm.quietStart === proactiveForm.quietEnd) {
+    message.warning('静默时段的开始与结束不能相同')
+    return
+  }
+  proactiveSaving.value = true
+  try {
+    const res = await saveProactiveConfig({
+      deviceId: agent.deviceId,
+      roleId: agent.roleId,
+      allowLlm: proactiveForm.allowLlm,
+      dailyLimit: proactiveForm.dailyLimit,
+      cooldownMinutes: proactiveForm.cooldownMinutes,
+      minIdleSeconds: proactiveForm.minIdleSeconds,
+      activeStart: proactiveForm.activeStart,
+      activeEnd: proactiveForm.activeEnd,
+      quietStart: proactiveForm.quietStart,
+      quietEnd: proactiveForm.quietEnd,
+    })
+    if (res.code === 200) {
+      if (res.data) {
+        proactiveConfig.value = res.data
+        hydrateProactiveForm(res.data)
+      }
+      message.success('主动搭话设置已保存')
+    } else {
+      message.error(res.message || '保存失败')
+    }
+  } catch (e) {
+    console.error('保存主动搭话配置失败:', e)
+    message.error('保存失败')
+  } finally {
+    proactiveSaving.value = false
+  }
+}
+
+/** 把草稿恢复为默认值（仅前端，需再点“保存设置”才写库）。 */
+function resetProactiveDefaults() {
+  Object.assign(proactiveForm, PROACTIVE_DEFAULTS)
+  message.info('已恢复为默认值，点“保存设置”后生效')
 }
 
 async function onToggleProactive(checked: boolean) {
@@ -414,25 +528,121 @@ onMounted(fetchAgents)
 
       <!-- 待命主动搭话 -->
       <a-card :bordered="false" title="待命主动搭话" style="margin-bottom: 16px">
-        <a-row :gutter="24" align="middle">
-          <a-col :xs="24" :md="10">
-            <a-space>
-              <a-switch
-                :checked="proactiveConfig?.enabled === 1"
-                :loading="proactiveLoading"
-                @change="onToggleProactive"
-              />
-              <span>{{ proactiveConfig?.enabled === 1 ? '已开启（设备待命时会主动找用户）' : '已关闭' }}</span>
-            </a-space>
-          </a-col>
-          <a-col :xs="24" :md="14" v-if="proactiveConfig">
-            <span class="metric-hint">
-              活跃 {{ proactiveConfig.activeStart }}–{{ proactiveConfig.activeEnd }}，静默
-              {{ proactiveConfig.quietStart }}–{{ proactiveConfig.quietEnd }}，每日最多
-              {{ proactiveConfig.dailyLimit }} 次，冷却 {{ proactiveConfig.cooldownMinutes }} 分钟
-            </span>
-          </a-col>
-        </a-row>
+        <template #extra>
+          <a-space>
+            <a-button size="small" :disabled="!selectedAgent" @click="resetProactiveDefaults">
+              恢复默认
+            </a-button>
+            <a-button
+              size="small"
+              type="primary"
+              :disabled="!selectedAgent"
+              :loading="proactiveSaving"
+              @click="saveProactive"
+            >
+              保存设置
+            </a-button>
+          </a-space>
+        </template>
+
+        <a-space style="margin-bottom: 4px">
+          <a-switch
+            :checked="proactiveConfig?.enabled === 1"
+            :loading="proactiveLoading"
+            @change="onToggleProactive"
+          />
+          <span>{{ proactiveConfig?.enabled === 1 ? '已开启（设备待命时会主动找用户）' : '已关闭' }}</span>
+        </a-space>
+        <div class="metric-hint" style="margin-bottom: 12px">
+          下面的参数无论开关是否开启都可预先调整，保存后立即生效；总开关关闭时设备不会主动搭话。
+        </div>
+
+        <a-divider style="margin: 4px 0 16px" />
+
+        <a-form layout="vertical" :model="proactiveForm">
+          <a-row :gutter="16">
+            <a-col :xs="24" :sm="12" :md="8">
+              <a-form-item label="活跃时段（仅此段内考虑主动）">
+                <a-time-range-picker
+                  v-model:value="activeRange"
+                  format="HH:mm"
+                  value-format="HH:mm"
+                  :order="false"
+                  :allow-clear="false"
+                  :minute-step="5"
+                  style="width: 100%"
+                />
+              </a-form-item>
+            </a-col>
+            <a-col :xs="24" :sm="12" :md="8">
+              <a-form-item label="静默时段（绝不打扰，可跨零点）">
+                <a-time-range-picker
+                  v-model:value="quietRange"
+                  format="HH:mm"
+                  value-format="HH:mm"
+                  :order="false"
+                  :allow-clear="false"
+                  :minute-step="5"
+                  style="width: 100%"
+                />
+              </a-form-item>
+            </a-col>
+            <a-col :xs="24" :sm="12" :md="8">
+              <a-form-item label="每日次数上限">
+                <a-input-number
+                  v-model:value="proactiveForm.dailyLimit"
+                  :min="0"
+                  :max="50"
+                  :precision="0"
+                  addon-after="次 / 天"
+                  style="width: 100%"
+                />
+              </a-form-item>
+            </a-col>
+            <a-col :xs="24" :sm="12" :md="8">
+              <a-form-item label="冷却时间（两次主动之间的最短间隔）">
+                <a-input-number
+                  v-model:value="proactiveForm.cooldownMinutes"
+                  :min="0"
+                  :max="1440"
+                  :step="10"
+                  :precision="0"
+                  addon-after="分钟"
+                  style="width: 100%"
+                />
+              </a-form-item>
+            </a-col>
+            <a-col :xs="24" :sm="12" :md="8">
+              <a-form-item label="最短待命时长（连续待命多久才可主动）">
+                <a-input-number
+                  v-model:value="minIdleMinutes"
+                  :min="0"
+                  :max="180"
+                  :precision="0"
+                  addon-after="分钟"
+                  style="width: 100%"
+                />
+              </a-form-item>
+            </a-col>
+            <a-col :xs="24" :sm="12" :md="8">
+              <a-form-item label="LLM 增强开场（关闭则只用固定脚本台词）">
+                <a-switch
+                  :checked="proactiveForm.allowLlm === 1"
+                  checked-children="增强"
+                  un-checked-children="脚本"
+                  @change="(v: boolean) => (proactiveForm.allowLlm = v ? 1 : 0)"
+                />
+              </a-form-item>
+            </a-col>
+          </a-row>
+        </a-form>
+
+        <div class="metric-hint" v-if="proactiveConfig">
+          当前生效：活跃 {{ toHm(proactiveConfig.activeStart) }}–{{ toHm(proactiveConfig.activeEnd) }}，静默
+          {{ toHm(proactiveConfig.quietStart) }}–{{ toHm(proactiveConfig.quietEnd) }}，每日最多
+          {{ proactiveConfig.dailyLimit }} 次，冷却 {{ proactiveConfig.cooldownMinutes }} 分钟，最短待命
+          {{ Math.round((proactiveConfig.minIdleSeconds ?? 0) / 60) }} 分钟。
+        </div>
       </a-card>
 
       <!-- 快乐星球档案 -->

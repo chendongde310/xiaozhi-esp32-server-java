@@ -7,6 +7,7 @@ export const ROUTES = {
   REGISTER: '/register',
   FORGET: '/forget',
   PLANET_APP: '/app',
+  PLANET_APP_CHAT: '/app/chat',
   DASHBOARD: '/dashboard',
   DEVICE: '/device',
   ROLE: '/role',

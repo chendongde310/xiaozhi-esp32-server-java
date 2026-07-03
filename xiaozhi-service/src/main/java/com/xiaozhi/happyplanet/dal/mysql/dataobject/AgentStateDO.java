@@ -63,6 +63,12 @@ public class AgentStateDO {
     /** 当日主动搭话是否被忽略：1=已被忽略，当天退避不再主动 */
     private Integer proactiveIgnoredToday;
 
+    // —— 主题任务链（V18）——
+    /** 当前进行中的主题链键（空=未在链中） */
+    private String currentChainKey;
+    /** 当前主题链已推进到的序号 */
+    private Integer currentChainSeq;
+
     private LocalDateTime createTime;
     private LocalDateTime updateTime;
 }

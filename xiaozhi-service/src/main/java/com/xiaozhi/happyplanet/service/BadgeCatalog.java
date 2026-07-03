@@ -36,6 +36,8 @@ public final class BadgeCatalog {
         put(m, "day_30", "相伴一月", "累计陪伴满 30 天", "🌙", "anniversary");
         put(m, "day_100", "百日同行", "累计陪伴满 100 天", "💯", "anniversary");
         put(m, "day_365", "四季相伴", "累计陪伴满 365 天", "🎂", "anniversary");
+        // 主题任务链类（完成整条主题周授予，键 = "chain_" + chainKey）
+        put(m, "chain_observe_week", "地球观察家", "完成一整周「地球观察周」主题任务", "🔭", "chain");
         BADGES = m;
     }
 
@@ -73,5 +75,14 @@ public final class BadgeCatalog {
     /** 纪念里程碑天数 → 徽章键，例如 30 → day_30。 */
     public static String anniversaryBadge(int milestone) {
         return "day_" + milestone;
+    }
+
+    /** 主题链键 → 主题勋章键，例如 observe_week → chain_observe_week。未登记的链返回 null（不授勋）。 */
+    public static String chainBadge(String chainKey) {
+        if (chainKey == null) {
+            return null;
+        }
+        String key = "chain_" + chainKey;
+        return isKnown(key) ? key : null;
     }
 }

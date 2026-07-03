@@ -53,6 +53,15 @@ const routes: RouteRecordRaw[] = [
     },
   },
   {
+    path: '/app/chat',
+    name: 'planet-app-chat',
+    component: () => import('../views/PlanetAppView.vue'),
+    meta: {
+      title: '星球聊天',
+      requiresAuth: true,
+    },
+  },
+  {
     path: '/',
     component: MainLayout,
     children: [

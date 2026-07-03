@@ -1,5 +1,7 @@
 <template>
   <div class="template-container">
+    <a-tabs v-model:activeKey="activeTab" class="template-tabs">
+      <a-tab-pane key="template" :tab="t('template.growth.tabTemplate')">
     <!-- 搜索区域 -->
     <a-card class="search-card">
       <a-form layout="inline">
@@ -83,6 +85,12 @@
 
     <!-- 回到顶部 -->
     <a-back-top />
+      </a-tab-pane>
+
+      <a-tab-pane key="growth" :tab="t('template.growth.tabGrowth')">
+        <GrowthPromptPanel />
+      </a-tab-pane>
+    </a-tabs>
 
     <!-- 创建/编辑对话框 -->
     <a-modal
@@ -233,8 +241,12 @@ import {
 import { useTable } from '@/composables/useTable'
 import { useModal } from '@/composables/useModal'
 import TableActionButtons from '@/components/TableActionButtons.vue'
+import GrowthPromptPanel from '@/components/GrowthPromptPanel.vue'
 
 const { t } = useI18n()
+
+// 顶部标签页：提示词模板 / 成长状态提示词
+const activeTab = ref('template')
 
 const columns = computed(() => [
   {

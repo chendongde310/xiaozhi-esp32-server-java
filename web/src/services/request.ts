@@ -25,7 +25,7 @@ export interface RequestError extends Error {
 const request: AxiosInstance = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || '',
   timeout: 30000,
-  withCredentials: true,
+  withCredentials: import.meta.env.VITE_MOBILE_APP !== 'true',
   headers: {
     'Content-Type': 'application/json;charset=UTF-8',
   },

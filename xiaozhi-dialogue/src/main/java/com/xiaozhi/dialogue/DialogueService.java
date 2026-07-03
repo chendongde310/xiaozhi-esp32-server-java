@@ -11,6 +11,8 @@ import com.xiaozhi.dialogue.llm.tool.function.CreateAppLinkCodeFunction;
 import com.xiaozhi.ai.llm.memory.MessageTimeMetadata;
 import com.xiaozhi.ai.llm.service.IntentService;
 import com.xiaozhi.ai.stt.SttResult;
+import com.xiaozhi.ai.voiceprint.SpeakerVerdict;
+import com.xiaozhi.ai.voiceprint.VoiceprintService;
 import com.xiaozhi.common.model.bo.MessageMetadataBO;
 import com.xiaozhi.happyplanet.service.PlayerAgentService;
 import org.springframework.ai.chat.messages.UserMessage;
@@ -73,6 +75,8 @@ public class DialogueService{
     private StorageServiceFactory storageServiceFactory;
     @Resource
     private PlayerAgentService playerAgentService;
+    @Resource
+    private VoiceprintService voiceprintService;
 
     @org.springframework.context.event.EventListener
     public void onApplicationEvent(ChatAbortedEvent event) {
@@ -199,7 +203,10 @@ public class DialogueService{
                 session.setUserAudioPath(userAudioPath);
                 saveUserAudio(session, userAudioPath);
 
-                handleText(session, sttResult);
+                // 声纹比对：判定当轮说话人是主人还是访客（fail-open，见 resolveSpeaker）
+                String speaker = resolveSpeaker(session);
+
+                handleText(session, sttResult, speaker);
 
             } catch (Exception e) {
                 log.error("流式识别错误: {}", e.getMessage(), e);
@@ -234,6 +241,15 @@ public class DialogueService{
      * @param sttResult STT结果（纯文本使用 SttResult.textOnly() 包装）
      */
     public void handleText(ChatSession session, SttResult sttResult) {
+        handleText(session, sttResult, null);
+    }
+
+    /**
+     * 文本处理入口（带说话人身份）。
+     *
+     * @param speaker 声纹判定的说话人标签（"主人"/"访客"），无声纹结果时为 null
+     */
+    public void handleText(ChatSession session, SttResult sttResult, String speaker) {
         try {
             Persona persona = session.getPersona();
 
@@ -243,7 +259,7 @@ public class DialogueService{
                 return;
             }
 
-            UserMessage userMessage = buildUserMessage(text, sttResult);
+            UserMessage userMessage = buildUserMessage(text, sttResult, speaker);
 
             // 意图检测
             if (intentService.detect(text) == IntentService.Intent.EXIT) {
@@ -326,15 +342,16 @@ public class DialogueService{
                 || normalized.contains("星球码是多少");
     }
 
-    private static UserMessage buildUserMessage(String text, SttResult sttResult) {
+    private static UserMessage buildUserMessage(String text, SttResult sttResult, String speaker) {
         MessageMetadataBO metadataBO = MessageMetadataBO.builder()
+                .speaker(StringUtils.hasText(speaker) ? speaker : null)
                 .emotion(sttResult.hasEmotion() ? sttResult.emotion() : null)
                 .emotionScore(sttResult.hasEmotion() ? sttResult.emotionScore() : null)
                 .emotionDegree(sttResult.hasEmotion() ? sttResult.emotionDegree() : null)
                 .build();
         Map<String, Object> msgMeta = new HashMap<>();
         // 只要任一字段有值就挂载；全空时不挂，保持 UserMessage.metadata 干净
-        if (StringUtils.hasText(metadataBO.getEmotion())) {
+        if (StringUtils.hasText(metadataBO.getEmotion()) || StringUtils.hasText(metadataBO.getSpeaker())) {
             msgMeta.put(MessageMetadataBO.METADATA_KEY, metadataBO);
         }
         UserMessage userMessage = UserMessage.builder().text(text).metadata(msgMeta).build();
@@ -408,6 +425,39 @@ public class DialogueService{
             }
         } catch (Exception e) {
             log.error("中止对话失败: {}", e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 声纹比对，判定当轮说话人身份并返回标签（"主人"/"访客"）。
+     *
+     * <p><b>fail-open</b>：以下任一情形一律返回 null（按普通对话、不进入边界模式），
+     * 绝不因故障把主人锁在门外：功能未启用、设备未绑定玩家、玩家未录入声纹、音频过短、接口异常。
+     * 复用 VAD 已缓存的当轮 PCM（16k/16bit/单声道），无额外录音成本。
+     */
+    private String resolveSpeaker(ChatSession session) {
+        try {
+            if (!voiceprintService.isEnabled()) {
+                return null;
+            }
+            DeviceBO device = session.getDevice();
+            if (device == null || !StringUtils.hasText(device.getDeviceId()) || device.getRoleId() == null) {
+                return null;
+            }
+            Integer userId = playerAgentService.findPlayerUserId(device.getDeviceId(), device.getRoleId());
+            if (userId == null) {
+                return null;
+            }
+            var voiceprint = voiceprintService.get(userId);
+            if (voiceprint == null) {
+                return null;
+            }
+            byte[] pcm = AudioUtils.joinPcmFrames(vadService.getPcmData(session.getSessionId()));
+            SpeakerVerdict verdict = voiceprintService.verify(voiceprint.getFeatureId(), pcm);
+            return verdict.label();
+        } catch (Exception e) {
+            log.warn("声纹判定失败，按普通对话处理: {}", e.getMessage());
+            return null;
         }
     }
 

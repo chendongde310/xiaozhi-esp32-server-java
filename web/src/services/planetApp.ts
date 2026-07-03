@@ -182,6 +182,36 @@ export function deleteAppPlanetProfile(deviceId: string, roleId: number, field: 
   return http.delete<{ removed: number }>('/app/planet/profile', { deviceId, roleId, field })
 }
 
+/** 声纹状态 */
+export interface VoiceprintStatus {
+  /** 服务端是否启用声纹功能 */
+  enabled: boolean
+  /** 当前用户是否已录入声纹 */
+  enrolled: boolean
+  /** 判定为主人的相似度阈值 */
+  threshold?: number
+  updatedAt?: string | null
+  createdAt?: string | null
+  removed?: boolean
+}
+
+/** 查询「我的声纹」状态 */
+export function getVoiceprint() {
+  return http.get<VoiceprintStatus>('/app/voiceprint')
+}
+
+/** 创建 / 重录「我的声纹」（上传 16k 单声道 WAV） */
+export function enrollVoiceprint(wav: Blob) {
+  const form = new FormData()
+  form.append('audio', wav, 'voiceprint.wav')
+  return http.postMultipart<VoiceprintStatus>('/app/voiceprint', form)
+}
+
+/** 删除「我的声纹」 */
+export function deleteVoiceprint() {
+  return http.delete<VoiceprintStatus>('/app/voiceprint')
+}
+
 export function openAppChatSession(deviceId: string, roleId: number, sessionId?: string) {
   return http.post<{ sessionId: string }>('/app/chat/open', null, {
     params: sessionId ? { deviceId, roleId, sessionId } : { deviceId, roleId },

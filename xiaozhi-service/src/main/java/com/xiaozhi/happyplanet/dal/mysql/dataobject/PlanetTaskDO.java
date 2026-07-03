@@ -21,5 +21,14 @@ public class PlanetTaskDO {
     private String content;
     private String audience;
     private Integer enabled;
+
+    // —— 主题任务链（V18）——
+    /** 主题链键（空=独立单条任务，既有行为不变） */
+    private String chainKey;
+    /** 主题链内序号（1..N，从 1 开始） */
+    private Integer chainSeq;
+    /** 主题链标题（如“地球观察周”） */
+    private String chainTitle;
+
     private LocalDateTime createTime;
 }

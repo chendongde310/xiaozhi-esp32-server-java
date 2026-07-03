@@ -1,14 +1,15 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import {
+  ArrowLeftOutlined,
   HomeOutlined,
   IdcardOutlined,
   LinkOutlined,
   MessageOutlined,
   RobotOutlined,
   SendOutlined,
-  ThunderboltOutlined,
   WifiOutlined,
   EnvironmentOutlined,
   ClockCircleOutlined,
@@ -23,8 +24,13 @@ import {
   StarOutlined,
   ShareAltOutlined,
   DownloadOutlined,
+  CopyOutlined,
 } from '@ant-design/icons-vue'
+import { create as createQRCode } from 'qrcode'
+import PlanetHeroModel from '@/components/PlanetHeroModel.vue'
+import VoiceprintCard from '@/components/VoiceprintCard.vue'
 import { useUserStore } from '@/store/user'
+import { ROUTES } from '@/router/routes'
 import {
   appChatStream,
   closeAppChatSession,
@@ -42,7 +48,7 @@ import {
   type WeeklyReportView,
 } from '@/services/planetApp'
 
-type TabKey = 'home' | 'growth' | 'profile' | 'chat' | 'device'
+type TabKey = 'home' | 'growth' | 'profile' | 'device'
 
 interface AppChatMessage {
   id: number
@@ -56,6 +62,8 @@ interface AppChatMessage {
 const AVATAR_IMAGE = '/app-assets/happy-companion.png'
 
 const userStore = useUserStore()
+const route = useRoute()
+const router = useRouter()
 const activeTab = ref<TabKey>('home')
 const devices = ref<PlanetAppDevice[]>([])
 const roles = ref<PlanetAppRole[]>([])
@@ -64,7 +72,6 @@ const planetProfile = ref<PlanetProfileView | null>(null)
 const loading = ref(false)
 const linking = ref(false)
 const linkCode = ref('')
-const avatarTilt = ref({ x: 0, y: 0 })
 const profileEditorOpen = ref(false)
 const profileEditing = ref(false)
 const profileSubmitting = ref(false)
@@ -146,11 +153,11 @@ const tabs = [
   { key: 'home' as const, label: '星球', icon: HomeOutlined },
   { key: 'growth' as const, label: '成长', icon: RiseOutlined },
   { key: 'profile' as const, label: '档案', icon: IdcardOutlined },
-  { key: 'chat' as const, label: '聊天', icon: MessageOutlined },
   { key: 'device' as const, label: '我的AI', icon: RobotOutlined },
 ]
 
 const activeIndex = computed(() => tabs.findIndex(tab => tab.key === activeTab.value))
+const isChatPage = computed(() => route.path === ROUTES.PLANET_APP_CHAT)
 
 const quickPrompts = [
   '今天给我一个快乐任务',
@@ -191,10 +198,6 @@ const energyLevelLabel = computed(() => {
   if (level === 'high') return '高光在线'
   return '稳定陪伴'
 })
-
-const avatarStyle = computed(() => ({
-  transform: `perspective(900px) rotateX(${avatarTilt.value.x}deg) rotateY(${avatarTilt.value.y}deg) translateZ(12px)`,
-}))
 
 const profileRows = computed(() => {
   const profile = displayProfile.value.profile || {}
@@ -251,6 +254,20 @@ const report = ref<WeeklyReportView | null>(null)
 const reportLoading = ref(false)
 const shareOpen = ref(false)
 const shareImage = ref('')
+const shareLoading = ref(false)
+
+const shareTitle = '快乐星球 · 我的星球周报'
+const inviteUrl = computed(() => {
+  const origin = window.location.origin
+  const params = new URLSearchParams({ from: 'planet' })
+  const inviter = userStore.userInfo?.userId
+  if (inviter) params.set('ref', String(inviter))
+  return `${origin}/register?${params.toString()}`
+})
+const shareText = computed(
+  () =>
+    `我和「${companionName.value}」在快乐星球一起走过了这一周 ✨ 累计陪伴 ${displayProfile.value.companionDays} 天。扫码或打开链接，认领属于你的专属 AI 陪伴～`,
+)
 
 const demoReport: WeeklyReportView = {
   periodStart: '2026-06-26',
@@ -304,23 +321,90 @@ function reportRange(r?: WeeklyReportView | null) {
   return `${(r.periodStart || '').slice(5)} ~ ${(r.periodEnd || '').slice(5)}`
 }
 
-function openShare() {
+async function openShare() {
   const r = reportData.value
   if (!r) {
     message.info('本周还没有可分享的报告')
     return
   }
+  shareOpen.value = true
+  shareLoading.value = true
+  shareImage.value = ''
   try {
-    shareImage.value = buildShareImage(r)
-    shareOpen.value = true
+    shareImage.value = await buildShareImage(r)
   } catch (error) {
     console.error('生成分享图失败:', error)
-    message.error('生成分享图失败')
+    message.error('生成分享图失败，请稍后再试')
+  } finally {
+    shareLoading.value = false
   }
 }
 
 function closeShare() {
   shareOpen.value = false
+}
+
+async function shareBlob(): Promise<Blob | null> {
+  if (!shareImage.value) return null
+  try {
+    return await (await fetch(shareImage.value)).blob()
+  } catch (error) {
+    console.error('读取分享图失败:', error)
+    return null
+  }
+}
+
+// 系统分享面板（Web Share API，移动端可直接分享到微信/QQ 等）
+async function nativeShare() {
+  const nav = navigator as Navigator & {
+    canShare?: (data?: ShareData) => boolean
+    share?: (data: ShareData) => Promise<void>
+  }
+  const data: ShareData = { title: shareTitle, text: shareText.value, url: inviteUrl.value }
+  try {
+    const blob = await shareBlob()
+    const file = blob ? new File([blob], '快乐星球周报.png', { type: 'image/png' }) : null
+    if (file && nav.canShare?.({ files: [file] }) && nav.share) {
+      await nav.share({ ...data, files: [file] })
+    } else if (nav.share) {
+      await nav.share(data)
+    } else {
+      await copyShareImage()
+      message.info('当前环境不支持直接分享，已复制图片，去粘贴给好友吧')
+    }
+  } catch (error) {
+    if ((error as DOMException)?.name !== 'AbortError') {
+      console.error('分享失败:', error)
+      message.warning('分享未完成，可先保存图片或复制链接')
+    }
+  }
+}
+
+async function copyShareImage() {
+  const blob = await shareBlob()
+  const clip = navigator.clipboard as Clipboard & { write?: (items: ClipboardItem[]) => Promise<void> }
+  if (blob && clip?.write && typeof ClipboardItem !== 'undefined') {
+    try {
+      await clip.write([new ClipboardItem({ 'image/png': blob })])
+      message.success('图片已复制，可直接粘贴给好友')
+      return
+    } catch (error) {
+      console.error('复制图片失败:', error)
+    }
+  }
+  message.info('当前环境不支持复制图片，已改为保存')
+  downloadShare()
+}
+
+async function copyInviteLink() {
+  const text = `${shareText.value}\n${inviteUrl.value}`
+  try {
+    await navigator.clipboard.writeText(text)
+    message.success('邀请链接已复制')
+  } catch (error) {
+    console.error('复制链接失败:', error)
+    message.warning(inviteUrl.value)
+  }
 }
 
 function downloadShare() {
@@ -331,99 +415,227 @@ function downloadShare() {
   a.click()
 }
 
-// —— 分享图（客户端 canvas 生成，含品牌与邀请文案）——
-function buildShareImage(r: WeeklyReportView): string {
-  const W = 720
-  const H = 1120
+// —— 分享图（客户端 canvas 生成：品牌、周报数据、二维码邀请）——
+const SHARE_INK = '#f5f8fc'
+const SHARE_INK_2 = 'rgba(245, 248, 252, 0.62)'
+const SHARE_GOLD = 'rgba(255, 209, 102, 0.95)'
+const CJK_FONT = 'system-ui, "PingFang SC", "Microsoft YaHei", sans-serif'
+
+async function buildShareImage(r: WeeklyReportView): Promise<string> {
+  const W = 750
+  const pad = 56
+  const innerW = W - pad * 2
+  const mems = (r.newMemories || []).slice(0, 3)
+  const memLines = mems.length || 1
+  const highlight = r.highlight || '这一周静静地陪着，也很好。'
+
   const canvas = document.createElement('canvas')
-  canvas.width = W
-  canvas.height = H
   const ctx = canvas.getContext('2d')
   if (!ctx) return ''
 
+  // 先按内容量算出画布高度，避免留白或裁切
+  const quoteFont = `600 26px ${CJK_FONT}`
+  ctx.font = quoteFont
+  const quoteLines = measureWrapLines(ctx, highlight, innerW - 64)
+
+  const headerBottom = 56 + 116
+  const energyTop = headerBottom + 24
+  const energyH = 196
+  const statsTop = energyTop + energyH + 18
+  const statsH = 2 * 104 + 12
+  const memTop = statsTop + statsH + 24
+  const memBottom = memTop + 42 + memLines * 44
+  const quoteTop = memBottom + 10
+  const quoteH = quoteLines * 40 + 56
+  const footerTop = quoteTop + quoteH + 26
+  const footerH = 172
+  const H = footerTop + footerH + 52
+
+  canvas.width = W
+  canvas.height = H
+
   const bg = ctx.createLinearGradient(0, 0, W, H)
-  bg.addColorStop(0, '#101522')
-  bg.addColorStop(0.5, '#14242a')
-  bg.addColorStop(1, '#291d31')
+  bg.addColorStop(0, '#0e1420')
+  bg.addColorStop(0.5, '#14222a')
+  bg.addColorStop(1, '#241a30')
   ctx.fillStyle = bg
   ctx.fillRect(0, 0, W, H)
-  radialGlow(ctx, W * 0.2, H * 0.1, 300, 'rgba(255, 202, 96, 0.20)')
-  radialGlow(ctx, W * 0.85, H * 0.04, 320, 'rgba(69, 198, 201, 0.18)')
+  radialGlow(ctx, W * 0.16, H * 0.05, 340, 'rgba(255, 199, 92, 0.18)')
+  radialGlow(ctx, W * 0.9, H * 0.02, 320, 'rgba(73, 215, 209, 0.16)')
+  radialGlow(ctx, W * 0.5, H * 1.02, 440, 'rgba(150, 92, 220, 0.16)')
 
   ctx.textBaseline = 'top'
-  ctx.fillStyle = 'rgba(255, 209, 102, 0.92)'
-  ctx.font = '700 24px system-ui, "PingFang SC", "Microsoft YaHei", sans-serif'
-  ctx.fillText('HAPPY PLANET · 星球周报', 56, 62)
 
-  ctx.fillStyle = '#f8fbff'
-  ctx.font = '800 56px system-ui, "PingFang SC", "Microsoft YaHei", sans-serif'
-  ctx.fillText(truncate(companionName.value, 10), 56, 100)
+  // 头部：头像 + 名称 + 周期
+  const avatar = await loadImage(AVATAR_IMAGE)
+  const textX = avatar ? pad + 116 + 22 : pad
+  if (avatar) drawRoundedImage(ctx, avatar, pad, 56, 116, 116, 30)
+  ctx.fillStyle = SHARE_GOLD
+  ctx.font = `700 22px ${CJK_FONT}`
+  ctx.fillText('HAPPY PLANET · 星球周报', textX, 60)
+  ctx.fillStyle = SHARE_INK
+  ctx.font = `700 44px ${CJK_FONT}`
+  ctx.fillText(truncate(companionName.value, 8), textX, 92)
+  ctx.fillStyle = SHARE_INK_2
+  ctx.font = `500 22px ${CJK_FONT}`
+  ctx.fillText(`${reportRange(r)} · 与 ${truncate(userName.value, 8)} 的一周`, textX, 148)
 
-  ctx.fillStyle = 'rgba(248, 251, 255, 0.6)'
-  ctx.font = '500 24px system-ui, "PingFang SC", "Microsoft YaHei", sans-serif'
-  ctx.fillText(`${reportRange(r)} · 与 ${truncate(userName.value, 8)} 的一周`, 56, 176)
+  // 快乐能量
+  roundRect(ctx, pad, energyTop, innerW, energyH, 26, 'rgba(255, 255, 255, 0.06)')
+  ctx.fillStyle = SHARE_INK_2
+  ctx.font = `700 22px ${CJK_FONT}`
+  ctx.fillText('快乐能量', pad + 30, energyTop + 26)
+  ctx.fillStyle = SHARE_INK
+  ctx.font = '700 56px system-ui, sans-serif'
+  ctx.fillText(`${r.energyStart}  →  ${r.energyEnd}`, pad + 30, energyTop + 56)
+  drawShareSpark(ctx, r.energyCurve, pad + 30, energyTop + 142, innerW - 60, 40)
 
-  roundRect(ctx, 56, 228, W - 112, 208, 28, 'rgba(255, 255, 255, 0.06)')
-  ctx.fillStyle = 'rgba(248, 251, 255, 0.6)'
-  ctx.font = '700 22px system-ui, sans-serif'
-  ctx.fillText('快乐能量', 88, 258)
-  ctx.fillStyle = '#f8fbff'
-  ctx.font = '800 58px system-ui, sans-serif'
-  ctx.fillText(`${r.energyStart}  →  ${r.energyEnd}`, 88, 292)
-  drawShareSpark(ctx, r.energyCurve, 88, 372, W - 176, 46)
-
+  // 数据网格
   const stats: [string, string][] = [
     ['完成任务', `${r.tasksDone} 次`],
     ['连续打卡', `${r.streakDays} 天`],
     ['累计陪伴', `${r.companionDays} 天`],
     ['关系阶段', r.stage?.name || '初识'],
   ]
-  const baseY = 468
+  const cellW = (innerW - 12) / 2
   stats.forEach((s, i) => {
-    const col = i % 2
-    const row = Math.floor(i / 2)
-    const cellW = (W - 112) / 2 - 6
-    const x = 56 + col * (cellW + 12)
-    const y = baseY + row * 116
-    roundRect(ctx, x, y, cellW, 100, 22, 'rgba(255, 255, 255, 0.055)')
-    ctx.fillStyle = 'rgba(248, 251, 255, 0.6)'
-    ctx.font = '700 22px system-ui, sans-serif'
+    const x = pad + (i % 2) * (cellW + 12)
+    const y = statsTop + Math.floor(i / 2) * (104 + 12)
+    roundRect(ctx, x, y, cellW, 104, 20, 'rgba(255, 255, 255, 0.05)')
+    ctx.fillStyle = SHARE_INK_2
+    ctx.font = `600 22px ${CJK_FONT}`
     ctx.fillText(s[0], x + 26, y + 22)
     ctx.fillStyle = '#ffd166'
-    ctx.font = '800 34px system-ui, sans-serif'
-    ctx.fillText(s[1], x + 26, y + 50)
+    ctx.font = `700 34px ${CJK_FONT}`
+    ctx.fillText(s[1], x + 26, y + 52)
   })
 
-  let my = baseY + 2 * 116 + 22
-  ctx.fillStyle = 'rgba(248, 251, 255, 0.6)'
-  ctx.font = '700 24px system-ui, sans-serif'
-  ctx.fillText('这一周新记住的', 56, my)
-  my += 42
-  const mems = (r.newMemories || []).slice(0, 3)
+  // 这一周新记住的
+  ctx.fillStyle = SHARE_INK_2
+  ctx.font = `700 24px ${CJK_FONT}`
+  ctx.fillText('这一周新记住的', pad, memTop)
+  let my = memTop + 42
   if (!mems.length) {
-    ctx.fillStyle = 'rgba(248, 251, 255, 0.5)'
-    ctx.font = '500 24px system-ui, sans-serif'
-    ctx.fillText('这一周静静陪着，也很好。', 56, my)
-    my += 42
+    ctx.fillStyle = 'rgba(245, 248, 252, 0.5)'
+    ctx.font = `500 24px ${CJK_FONT}`
+    ctx.fillText('这一周静静陪着，也很好。', pad, my)
   }
   mems.forEach(m => {
-    ctx.fillStyle = '#f8fbff'
-    ctx.font = '600 26px system-ui, sans-serif'
-    ctx.fillText(`· ${truncate(m.label, 8)}：${truncate(m.value, 14)}`, 56, my)
+    ctx.fillStyle = SHARE_INK
+    ctx.font = `600 25px ${CJK_FONT}`
+    ctx.fillText(`· ${truncate(m.label, 8)}：${truncate(m.value, 14)}`, pad, my)
     my += 44
   })
 
-  my += 12
-  roundRect(ctx, 56, my, W - 112, 132, 24, 'rgba(73, 215, 209, 0.12)')
+  // 一句话
+  roundRect(ctx, pad, quoteTop, innerW, quoteH, 22, 'rgba(73, 215, 209, 0.12)')
   ctx.fillStyle = '#eafcff'
-  ctx.font = '600 26px system-ui, sans-serif'
-  wrapText(ctx, r.highlight || '', 88, my + 28, W - 176, 40)
+  ctx.font = quoteFont
+  wrapText(ctx, highlight, pad + 32, quoteTop + 28, innerW - 64, 40)
 
-  ctx.fillStyle = 'rgba(255, 209, 102, 0.85)'
-  ctx.font = '700 26px system-ui, sans-serif'
-  ctx.fillText('来快乐星球，认领你的专属陪伴 →', 56, H - 76)
+  // 底部：二维码邀请
+  roundRect(ctx, pad, footerTop, innerW, footerH, 22, 'rgba(255, 255, 255, 0.05)')
+  const qrInner = footerH - 24
+  drawQrCode(ctx, inviteUrl.value, pad + 12, footerTop + 12, qrInner)
+  const infoX = pad + 12 + qrInner + 26
+  ctx.fillStyle = SHARE_GOLD
+  ctx.font = `700 27px ${CJK_FONT}`
+  ctx.fillText('扫码认领你的专属陪伴', infoX, footerTop + 30)
+  ctx.fillStyle = SHARE_INK_2
+  ctx.font = `500 21px ${CJK_FONT}`
+  wrapText(ctx, '扫一扫，来快乐星球养一个会聊天、会陪你的星球伙伴。', infoX, footerTop + 76, pad + innerW - infoX - 12, 32)
 
   return canvas.toDataURL('image/png')
+}
+
+function loadImage(src: string): Promise<HTMLImageElement | null> {
+  return new Promise(resolve => {
+    const img = new Image()
+    img.onload = () => resolve(img)
+    img.onerror = () => resolve(null)
+    img.src = src
+  })
+}
+
+function roundClipPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+  ctx.beginPath()
+  ctx.moveTo(x + r, y)
+  ctx.arcTo(x + w, y, x + w, y + h, r)
+  ctx.arcTo(x + w, y + h, x, y + h, r)
+  ctx.arcTo(x, y + h, x, y, r)
+  ctx.arcTo(x, y, x + w, y, r)
+  ctx.closePath()
+}
+
+function drawRoundedImage(ctx: CanvasRenderingContext2D, img: HTMLImageElement, x: number, y: number, w: number, h: number, r: number) {
+  ctx.save()
+  roundClipPath(ctx, x, y, w, h, r)
+  ctx.clip()
+  const imgRatio = img.width / img.height
+  const boxRatio = w / h
+  let sw = img.width
+  let sh = img.height
+  let sx = 0
+  let sy = 0
+  if (imgRatio > boxRatio) {
+    sw = img.height * boxRatio
+    sx = (img.width - sw) / 2
+  } else {
+    sh = img.width / boxRatio
+    sy = (img.height - sh) / 2
+  }
+  ctx.drawImage(img, sx, sy, sw, sh, x, y, w, h)
+  ctx.restore()
+  roundClipPath(ctx, x, y, w, h, r)
+  ctx.lineWidth = 2
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)'
+  ctx.stroke()
+}
+
+function drawQrCode(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, size: number) {
+  roundRect(ctx, x, y, size, size, 14, '#ffffff')
+  let qr
+  try {
+    qr = createQRCode(text, { errorCorrectionLevel: 'M' })
+  } catch (error) {
+    console.error('生成二维码失败:', error)
+    return
+  }
+  const count = qr.modules.size
+  const data = qr.modules.data
+  const quiet = 4
+  const cell = size / (count + quiet * 2)
+  const off = quiet * cell
+  ctx.fillStyle = '#0b1220'
+  for (let row = 0; row < count; row++) {
+    for (let col = 0; col < count; col++) {
+      if (data[row * count + col]) {
+        ctx.fillRect(
+          Math.floor(x + off + col * cell),
+          Math.floor(y + off + row * cell),
+          Math.ceil(cell),
+          Math.ceil(cell),
+        )
+      }
+    }
+  }
+}
+
+function measureWrapLines(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): number {
+  const chars = Array.from(text || '')
+  let line = ''
+  let lines = 0
+  for (const ch of chars) {
+    const test = line + ch
+    if (ctx.measureText(test).width > maxWidth && line) {
+      lines++
+      line = ch
+    } else {
+      line = test
+    }
+  }
+  if (line) lines++
+  return Math.max(lines, 1)
 }
 
 function radialGlow(ctx: CanvasRenderingContext2D, cx: number, cy: number, radius: number, color: string) {
@@ -510,18 +722,6 @@ function getStateInfo(state?: string | number) {
 function formatTime(value?: string) {
   if (!value) return '暂无'
   return value.replace('T', ' ').slice(0, 16)
-}
-
-function handleAvatarMove(event: PointerEvent) {
-  const target = event.currentTarget as HTMLElement
-  const rect = target.getBoundingClientRect()
-  const x = ((event.clientY - rect.top) / rect.height - 0.5) * -12
-  const y = ((event.clientX - rect.left) / rect.width - 0.5) * 16
-  avatarTilt.value = { x, y }
-}
-
-function resetAvatarTilt() {
-  avatarTilt.value = { x: 0, y: 0 }
 }
 
 async function loadDevices() {
@@ -680,9 +880,16 @@ async function deleteProfileItem(row: { key: string; label: string }) {
 }
 
 function usePrompt(prompt: string) {
-  activeTab.value = 'chat'
   chatInput.value = prompt
-  nextTick(() => sendChat())
+  router.push(ROUTES.PLANET_APP_CHAT).then(() => nextTick(() => sendChat()))
+}
+
+function openChatPage() {
+  router.push(ROUTES.PLANET_APP_CHAT)
+}
+
+function closeChatPage() {
+  router.push(ROUTES.PLANET_APP)
 }
 
 function pushAssistant(content: string) {
@@ -824,6 +1031,12 @@ function resetChatSession() {
 
 watch(selectedDeviceId, resetChatSession)
 
+watch(isChatPage, (visible) => {
+  if (visible) {
+    scrollChatToBottom()
+  }
+})
+
 watch([selectedDeviceId, selectedRoleId], () => {
   loadPlanet()
 })
@@ -841,27 +1054,68 @@ onBeforeUnmount(() => {
 <template>
   <div class="planet-app">
     <main class="app-shell" :class="{ loading }">
+      <section v-if="isChatPage" class="chat-page">
+        <header class="chat-page-header">
+          <button class="back-button" type="button" @click="closeChatPage">
+            <ArrowLeftOutlined />
+          </button>
+          <div>
+            <span class="eyebrow">Happy Planet</span>
+            <h1>{{ companionName }}</h1>
+          </div>
+          <img :src="AVATAR_IMAGE" alt="" />
+        </header>
+
+        <div class="chat-head chat-head-standalone">
+          <img :src="AVATAR_IMAGE" alt="" />
+          <div>
+            <span>{{ companionName }}</span>
+            <strong>{{ stateInfo.label }} · {{ displayProfile.currentChannelLabel || '日间陪伴' }}</strong>
+          </div>
+        </div>
+
+        <div ref="chatScroller" class="chat-messages chat-messages-standalone">
+          <div v-for="item in chatMessages" :key="item.id" class="chat-row" :class="item.role">
+            <div class="bubble">
+              <span v-if="item.streaming && !item.content" class="typing-state">
+                <span>{{ item.statusText || '正在连接星球频道...' }}</span>
+                <span class="typing"><i></i><i></i><i></i></span>
+              </span>
+              <template v-else>{{ item.content }}</template>
+            </div>
+          </div>
+        </div>
+
+        <form class="chat-input chat-input-standalone" @submit.prevent="sendChat">
+          <input v-model="chatInput" type="text" placeholder="和小星说点什么" />
+          <button type="submit" :disabled="sending || !chatInput.trim()">
+            <SendOutlined />
+          </button>
+        </form>
+      </section>
+
+      <template v-else>
       <header class="topbar">
         <div>
           <span class="eyebrow">Happy Planet</span>
           <h1>{{ companionName }}</h1>
         </div>
-        <button class="icon-button" type="button" @click="refreshApp">
-          <ThunderboltOutlined />
+        <button class="icon-button" type="button" aria-label="open chat" @click="openChatPage">
+          <MessageOutlined />
         </button>
       </header>
 
       <section class="content" v-show="activeTab === 'home'">
-        <div class="hero-panel">
+        <div class="hero-panel" role="button" tabindex="0" aria-label="open chat" @click="openChatPage" @keydown.enter.prevent="openChatPage">
           <div class="hero-copy">
             <span class="welcome">Hi，{{ userName }}</span>
             <strong>{{ energyLevelLabel }}</strong>
             <p>{{ displayProfile.todayTask?.content || '今天的星球任务还在生成中。' }}</p>
           </div>
-          <div class="avatar-stage" @pointermove="handleAvatarMove" @pointerleave="resetAvatarTilt">
+          <div class="avatar-stage">
             <span class="orbit orbit-a"></span>
             <span class="orbit orbit-b"></span>
-            <img :src="AVATAR_IMAGE" alt="快乐星球智能体" :style="avatarStyle" />
+            <PlanetHeroModel />
           </div>
         </div>
 
@@ -1086,35 +1340,6 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <section class="content chat-content" v-show="activeTab === 'chat'">
-        <div class="chat-head">
-          <img :src="AVATAR_IMAGE" alt="" />
-          <div>
-            <span>{{ companionName }}</span>
-            <strong>{{ stateInfo.label }} · {{ displayProfile.currentChannelLabel || '日间陪伴' }}</strong>
-          </div>
-        </div>
-
-        <div ref="chatScroller" class="chat-messages">
-          <div v-for="item in chatMessages" :key="item.id" class="chat-row" :class="item.role">
-            <div class="bubble">
-              <span v-if="item.streaming && !item.content" class="typing-state">
-                <span>{{ item.statusText || '正在连接星球频道...' }}</span>
-                <span class="typing"><i></i><i></i><i></i></span>
-              </span>
-              <template v-else>{{ item.content }}</template>
-            </div>
-          </div>
-        </div>
-
-        <form class="chat-input" @submit.prevent="sendChat">
-          <input v-model="chatInput" type="text" placeholder="和小星说点什么" />
-          <button type="submit" :disabled="sending || !chatInput.trim()">
-            <SendOutlined />
-          </button>
-        </form>
-      </section>
-
       <section class="content" v-show="activeTab === 'device'">
         <div class="section-title">
           <span>我的AI</span>
@@ -1170,26 +1395,44 @@ onBeforeUnmount(() => {
             </button>
           </div>
         </div>
+
+        <VoiceprintCard />
       </section>
 
       <div v-if="shareOpen" class="share-overlay" @click.self="closeShare">
         <div class="share-modal">
-          <img v-if="shareImage" :src="shareImage" alt="星球周报分享图" />
+          <button class="share-close" type="button" aria-label="关闭" @click="closeShare">
+            <CloseOutlined />
+          </button>
+          <div v-if="shareLoading" class="share-loading">
+            <span class="share-spinner"></span>
+            <span>正在生成星球周报…</span>
+          </div>
+          <img v-else-if="shareImage" :src="shareImage" alt="星球周报分享图" />
+          <p class="share-hint">发给好友，或让 TA 扫图里的二维码，一起认领专属 AI 陪伴</p>
+          <button class="share-primary" type="button" :disabled="shareLoading" @click="nativeShare">
+            <ShareAltOutlined />
+            <span>分享给好友</span>
+          </button>
           <div class="share-actions">
-            <button type="button" class="ghost" @click="closeShare">
-              <CloseOutlined />
-              <span>关闭</span>
-            </button>
-            <button type="button" @click="downloadShare">
+            <button type="button" :disabled="shareLoading" @click="downloadShare">
               <DownloadOutlined />
               <span>保存图片</span>
+            </button>
+            <button type="button" :disabled="shareLoading" @click="copyShareImage">
+              <CopyOutlined />
+              <span>复制图片</span>
+            </button>
+            <button type="button" @click="copyInviteLink">
+              <LinkOutlined />
+              <span>复制链接</span>
             </button>
           </div>
         </div>
       </div>
 
       <nav class="tabbar">
-        <span class="tab-indicator" :style="{ '--active-index': activeIndex }" aria-hidden="true"></span>
+        <span class="tab-indicator" :style="{ transform: 'translateX(' + activeIndex * 100 + '%)' }" aria-hidden="true"></span>
         <button
           v-for="tab in tabs"
           :key="tab.key"
@@ -1201,6 +1444,7 @@ onBeforeUnmount(() => {
           <span>{{ tab.label }}</span>
         </button>
       </nav>
+      </template>
     </main>
   </div>
 </template>
@@ -1218,11 +1462,11 @@ onBeforeUnmount(() => {
   --dur: 0.34s;
 
   /* —— continuous ("squircle") corner radii —— */
-  --r-hero: 30px;
-  --r-card: 24px;
-  --r-panel: 22px;
-  --r-control: 16px;
-  --r-chip: 14px;
+  --r-hero: 28px;
+  --r-card: 22px;
+  --r-panel: 20px;
+  --r-control: 14px;
+  --r-chip: 12px;
   --r-pill: 999px;
 
   /* —— brand accents (kept as tints on glass) —— */
@@ -1234,23 +1478,23 @@ onBeforeUnmount(() => {
   --mint: #6fe6b2;
 
   /* —— foreground ink —— */
-  --ink: #f4f7fb;
-  --ink-2: rgba(244, 247, 251, 0.66);
-  --ink-3: rgba(244, 247, 251, 0.42);
+  --ink: #f5f8fc;
+  --ink-2: rgba(245, 248, 252, 0.6);
+  --ink-3: rgba(245, 248, 252, 0.38);
 
   /* —— Liquid Glass material —— */
   --glass-fill: rgba(255, 255, 255, 0.08);
   --glass-fill-2: rgba(255, 255, 255, 0.13);
-  --glass-stroke: rgba(255, 255, 255, 0.14);
-  --glass-highlight: rgba(255, 255, 255, 0.5);
+  --glass-stroke: rgba(255, 255, 255, 0.12);
+  --glass-highlight: rgba(255, 255, 255, 0.45);
   --glass-lowlight: rgba(0, 0, 0, 0.22);
   --glass-blur: 24px;
   --glass-sat: 180%;
 
   /* —— elevation —— */
-  --shadow-1: 0 8px 24px rgba(0, 0, 0, 0.26);
-  --shadow-2: 0 20px 48px rgba(0, 0, 0, 0.34);
-  --accent-glow: 0 12px 30px rgba(255, 199, 92, 0.28);
+  --shadow-1: 0 6px 20px rgba(0, 0, 0, 0.22);
+  --shadow-2: 0 18px 42px rgba(0, 0, 0, 0.32);
+  --accent-glow: 0 8px 20px rgba(255, 199, 92, 0.2);
 
   /* —— canvas —— */
   --bg-1: #0e1420;
@@ -1262,9 +1506,9 @@ onBeforeUnmount(() => {
   justify-content: center;
   color: var(--ink);
   background:
-    radial-gradient(120% 80% at 18% 6%, rgba(255, 199, 92, 0.22), transparent 42%),
-    radial-gradient(120% 80% at 88% 0%, rgba(73, 215, 209, 0.22), transparent 46%),
-    radial-gradient(120% 90% at 50% 108%, rgba(150, 92, 220, 0.2), transparent 55%),
+    radial-gradient(120% 80% at 18% 6%, rgba(255, 199, 92, 0.15), transparent 44%),
+    radial-gradient(120% 80% at 88% 0%, rgba(73, 215, 209, 0.15), transparent 48%),
+    radial-gradient(120% 90% at 50% 110%, rgba(150, 92, 220, 0.13), transparent 56%),
     linear-gradient(160deg, var(--bg-1) 0%, var(--bg-2) 48%, var(--bg-3) 100%);
   background-attachment: fixed;
   font-family:
@@ -1272,7 +1516,6 @@ onBeforeUnmount(() => {
     system-ui, 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', Inter, sans-serif;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
-  letter-spacing: -0.01em;
 }
 
 /* Adaptive light appearance — Liquid Glass is defined for both modes. */
@@ -1341,7 +1584,7 @@ onBeforeUnmount(() => {
 
 /* iOS large-title header — light chrome, content scrolls beneath. */
 .topbar {
-  padding: 14px 20px 10px;
+  padding: 12px 16px 8px;
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
@@ -1350,18 +1593,18 @@ onBeforeUnmount(() => {
   z-index: 5;
 
   h1 {
-    margin: 3px 0 0;
-    font-size: 30px;
-    line-height: 1.05;
-    font-weight: 800;
-    letter-spacing: -0.022em;
+    margin: 2px 0 0;
+    font-size: 28px;
+    line-height: 1.08;
+    font-weight: 700;
+    letter-spacing: -0.012em;
   }
 }
 
 .eyebrow {
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.14em;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--accent);
 }
@@ -1380,8 +1623,8 @@ onBeforeUnmount(() => {
 .welcome,
 .muted {
   font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
+  font-weight: 600;
+  letter-spacing: 0.01em;
 }
 
 /* Prominent glass — the accent-tinted primary control. */
@@ -1389,8 +1632,9 @@ onBeforeUnmount(() => {
 .chat-input button,
 .bind-row button {
   @include tappable;
-  width: 46px;
-  height: 46px;
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
   border: 0;
   border-radius: var(--r-control);
   display: inline-flex;
@@ -1416,7 +1660,7 @@ onBeforeUnmount(() => {
   overscroll-behavior-y: contain;
   -webkit-overflow-scrolling: touch;
   scrollbar-width: none;
-  padding: 8px 18px calc(112px + env(safe-area-inset-bottom, 0px));
+  padding: 6px 16px calc(110px + env(safe-area-inset-bottom, 0px));
 
   &::-webkit-scrollbar {
     display: none;
@@ -1434,6 +1678,13 @@ onBeforeUnmount(() => {
     linear-gradient(150deg, rgba(73, 215, 209, 0.28), transparent 52%),
     radial-gradient(140% 120% at 100% 100%, rgba(255, 199, 92, 0.22), transparent 60%),
     var(--glass-fill);
+  cursor: pointer;
+  touch-action: manipulation;
+
+  &:focus-visible {
+    outline: 2px solid rgba(255, 209, 102, 0.85);
+    outline-offset: 3px;
+  }
 }
 
 .hero-copy {
@@ -1444,10 +1695,10 @@ onBeforeUnmount(() => {
   strong {
     display: block;
     margin-top: 10px;
-    font-size: 32px;
-    line-height: 1.06;
-    font-weight: 800;
-    letter-spacing: -0.02em;
+    font-size: 27px;
+    line-height: 1.12;
+    font-weight: 700;
+    letter-spacing: -0.012em;
   }
 
   p {
@@ -1463,18 +1714,12 @@ onBeforeUnmount(() => {
   bottom: -26px;
   width: 270px;
   height: 300px;
-  display: grid;
-  place-items: center;
-  touch-action: none;
+  pointer-events: none;
+  touch-action: auto;
 
-  img {
-    width: 232px;
-    height: 290px;
-    object-fit: cover;
-    object-position: center;
-    border-radius: 40px;
-    transition: transform 220ms var(--ease-spring);
-    filter: drop-shadow(0 24px 40px rgba(0, 0, 0, 0.4));
+  .planet-hero-model {
+    width: 100%;
+    height: 100%;
   }
 }
 
@@ -1527,9 +1772,9 @@ onBeforeUnmount(() => {
 }
 
 .energy-head strong {
-  font-size: 26px;
-  font-weight: 800;
-  letter-spacing: -0.02em;
+  font-size: 25px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
 }
 
 .energy-track {
@@ -1593,7 +1838,7 @@ onBeforeUnmount(() => {
   padding: 0 13px;
   border-radius: var(--r-pill);
   font-size: 12px;
-  font-weight: 800;
+  font-weight: 700;
   border: 1px solid transparent;
 
   &.online {
@@ -1625,8 +1870,8 @@ onBeforeUnmount(() => {
   span {
     display: block;
     font-size: 22px;
-    font-weight: 800;
-    letter-spacing: -0.02em;
+    font-weight: 700;
+    letter-spacing: -0.01em;
   }
 
   strong {
@@ -1784,7 +2029,7 @@ onBeforeUnmount(() => {
   gap: 8px;
   color: var(--accent-ink);
   font-size: 15px;
-  font-weight: 800;
+  font-weight: 700;
   background: linear-gradient(150deg, #ffe08a, var(--accent) 55%, var(--accent-2));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.66), var(--accent-glow);
 
@@ -1858,9 +2103,63 @@ onBeforeUnmount(() => {
   border: 1px dashed var(--glass-stroke);
 }
 
-.chat-content {
+.chat-content,
+.chat-page {
   display: flex;
   flex-direction: column;
+}
+
+.chat-page {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  padding: 8px 16px calc(10px + env(safe-area-inset-bottom, 0px));
+  overflow: hidden;
+}
+
+.chat-page-header {
+  min-height: 76px;
+  padding: 6px 0 10px;
+  display: grid;
+  grid-template-columns: 44px 1fr 52px;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+
+  h1 {
+    margin: 2px 0 0;
+    font-size: 27px;
+    line-height: 1.08;
+    font-weight: 700;
+    letter-spacing: -0.012em;
+  }
+
+  img {
+    width: 52px;
+    height: 52px;
+    border-radius: 18px;
+    object-fit: cover;
+    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.34);
+  }
+}
+
+.back-button {
+  @include tappable;
+  width: 44px;
+  height: 44px;
+  border: 1px solid var(--glass-stroke);
+  border-radius: var(--r-control);
+  color: var(--ink);
+  background: var(--glass-fill-2);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+
+  svg {
+    font-size: 18px;
+  }
 }
 
 .chat-head {
@@ -1891,9 +2190,14 @@ onBeforeUnmount(() => {
   }
 }
 
+.chat-head-standalone {
+  margin-top: 0;
+  min-height: 72px;
+}
+
 .chat-messages {
   flex: 1;
-  min-height: 320px;
+  min-height: 0;
   overflow-y: auto;
   overscroll-behavior-y: contain;
   -webkit-overflow-scrolling: touch;
@@ -1903,6 +2207,11 @@ onBeforeUnmount(() => {
   &::-webkit-scrollbar {
     display: none;
   }
+}
+
+.chat-messages-standalone {
+  padding-top: 14px;
+  padding-bottom: 18px;
 }
 
 .chat-row {
@@ -1996,6 +2305,12 @@ onBeforeUnmount(() => {
   button:disabled {
     opacity: 0.4;
   }
+}
+
+.chat-input-standalone {
+  margin-top: 0;
+  flex-shrink: 0;
+  transform: translateZ(0);
 }
 
 .device-list {
@@ -2125,7 +2440,7 @@ onBeforeUnmount(() => {
   height: 66px;
   padding: 6px;
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   align-items: stretch;
   border-radius: 26px;
   background: var(--glass-fill-2);
@@ -2144,11 +2459,11 @@ onBeforeUnmount(() => {
   top: 6px;
   bottom: 6px;
   left: 6px;
-  width: calc((100% - 12px) / 5);
+  width: calc((100% - 12px) / 4);
   border-radius: 20px;
   background: linear-gradient(150deg, #ffe08a, var(--accent) 58%, var(--accent-2));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7), var(--accent-glow);
-  transform: translateX(calc(var(--active-index, 0) * 100%));
+  transform: translateX(0);
   transition: transform var(--dur) var(--ease-spring);
   z-index: 0;
 }
@@ -2243,7 +2558,7 @@ onBeforeUnmount(() => {
   strong {
     font-size: 20px;
     line-height: 1;
-    font-weight: 800;
+    font-weight: 700;
     color: #f4f7fb;
   }
 
@@ -2265,8 +2580,8 @@ onBeforeUnmount(() => {
     display: block;
     margin-top: 2px;
     font-size: 24px;
-    font-weight: 800;
-    letter-spacing: -0.02em;
+    font-weight: 700;
+    letter-spacing: -0.01em;
   }
 
   p {
@@ -2309,8 +2624,8 @@ onBeforeUnmount(() => {
   strong {
     display: block;
     font-size: 26px;
-    font-weight: 800;
-    letter-spacing: -0.02em;
+    font-weight: 700;
+    letter-spacing: -0.01em;
   }
 
   span {
@@ -2348,7 +2663,7 @@ onBeforeUnmount(() => {
   display: flex;
   justify-content: space-between;
   color: var(--ink-3);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .report-title {
@@ -2412,8 +2727,8 @@ onBeforeUnmount(() => {
 
     strong {
       font-size: 24px;
-      font-weight: 800;
-      letter-spacing: -0.02em;
+      font-weight: 700;
+      letter-spacing: -0.01em;
     }
   }
 
@@ -2430,7 +2745,7 @@ onBeforeUnmount(() => {
     strong {
       display: block;
       font-size: 20px;
-      font-weight: 800;
+      font-weight: 700;
       color: var(--accent);
       overflow-wrap: anywhere;
     }
@@ -2481,7 +2796,7 @@ onBeforeUnmount(() => {
   gap: 8px;
   color: var(--accent-ink);
   font-size: 15px;
-  font-weight: 800;
+  font-weight: 700;
   background: linear-gradient(150deg, #ffe08a, var(--accent) 55%, var(--accent-2));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.66), var(--accent-glow);
 }
@@ -2515,7 +2830,7 @@ onBeforeUnmount(() => {
     display: block;
     margin-top: 5px;
     font-style: normal;
-    font-size: 10px;
+    font-size: 11px;
     line-height: 1.3;
     color: var(--ink-3);
   }
@@ -2551,11 +2866,12 @@ onBeforeUnmount(() => {
 }
 
 .share-modal {
+  position: relative;
   width: 100%;
-  max-width: 340px;
+  max-width: 348px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 12px;
   animation: bubble-in 0.36s var(--ease-spring) both;
 
   img {
@@ -2565,32 +2881,104 @@ onBeforeUnmount(() => {
   }
 }
 
+.share-close {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  z-index: 2;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--glass-stroke);
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink);
+  background: rgba(16, 22, 34, 0.72);
+  backdrop-filter: blur(14px);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.share-loading {
+  aspect-ratio: 3 / 4;
+  border-radius: 22px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  font-size: 14px;
+  color: var(--ink-2);
+  background: var(--glass-fill);
+  border: 1px solid var(--glass-stroke);
+}
+
+.share-spinner {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.16);
+  border-top-color: var(--accent);
+  animation: spin 0.8s linear infinite;
+}
+
+.share-hint {
+  margin: 0 6px;
+  text-align: center;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+.share-primary {
+  @include tappable;
+  height: 50px;
+  border: 0;
+  border-radius: var(--r-control);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--accent-ink);
+  background: linear-gradient(150deg, #ffe08a, var(--accent) 55%, var(--accent-2));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.66), var(--accent-glow);
+
+  svg {
+    font-size: 18px;
+  }
+
+  &:disabled {
+    opacity: 0.5;
+  }
+}
+
 .share-actions {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, 1fr);
   gap: 10px;
 
   button {
     @include tappable;
-    height: 48px;
-    border: 0;
-    border-radius: var(--r-control);
+    @include glass(var(--r-control));
+    height: 62px;
     display: inline-flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 8px;
-    font-size: 15px;
-    font-weight: 800;
-    color: var(--accent-ink);
-    background: linear-gradient(150deg, #ffe08a, var(--accent) 55%, var(--accent-2));
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.66), var(--accent-glow);
+    gap: 5px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--ink);
 
-    &.ghost {
-      color: var(--ink);
-      background: var(--glass-fill-2);
-      border: 1px solid var(--glass-stroke);
-      box-shadow: inset 0 1px 0 var(--glass-highlight);
-      backdrop-filter: blur(var(--glass-blur));
+    svg {
+      font-size: 18px;
+      color: var(--accent);
+    }
+
+    &:disabled {
+      opacity: 0.5;
     }
   }
 }
@@ -2637,6 +3025,12 @@ onBeforeUnmount(() => {
 
   to {
     opacity: 1;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
   }
 }
 

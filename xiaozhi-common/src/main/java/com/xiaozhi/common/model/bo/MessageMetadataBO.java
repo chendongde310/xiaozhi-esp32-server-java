@@ -36,6 +36,12 @@ public class MessageMetadataBO {
     public static final String METADATA_KEY = "userMessageMetadata";
 
     /**
+     * 声纹识别出的说话人身份标签（"主人"/"访客"），仅启用声纹且比对出结果时有值。
+     * 由 {@code UserMessageAssembler} 渲染为 [说话人:xxx] 前缀，供 LLM 据此把握边界感。
+     */
+    private String speaker;
+
+    /**
      * 语音情感识别标签（neutral/happy/sad/angry/...），仅支持情感识别的 STT 有值。
      */
     private String emotion;
